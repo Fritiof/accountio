@@ -1,10 +1,13 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
+import { db } from './db/client.ts';
 import { env } from './env.ts';
+import { type JournalGenerator, createAnthropicJournalGenerator } from './lib/anthropic.ts';
 import { accountsRoute } from './routes/accounts.ts';
+import { type BillsRouteDeps, createBillsRoute } from './routes/bills.ts';
 
-export function createApp(): Hono {
+export function createApp(deps?: Partial<BillsRouteDeps>): Hono {
   const app = new Hono();
 
   app.use('*', logger());
@@ -14,9 +17,17 @@ export function createApp(): Hono {
     app.use('*', cors({ origin: origins, credentials: true }));
   }
 
+  const generateJournal: JournalGenerator =
+    deps?.generateJournal ??
+    createAnthropicJournalGenerator({
+      apiKey: env.ANTHROPIC_API_KEY,
+      model: env.ANTHROPIC_MODEL,
+    });
+
   app.get('/health', (c) => c.json({ ok: true }));
 
   app.route('/api/accounts', accountsRoute);
+  app.route('/api/bills', createBillsRoute({ db: deps?.db ?? db, generateJournal }));
 
   return app;
 }
