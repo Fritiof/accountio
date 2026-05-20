@@ -1,0 +1,5 @@
+# Format + lint staged files (auto-fixes formatting, fails on lint errors like noExplicitAny).
+bunx lint-staged
+
+# Typecheck both apps. Implicit `any`, missing properties, narrowing failures — all block.
+bun run typecheck
