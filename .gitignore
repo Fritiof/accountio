@@ -1,2 +1,28 @@
+# OS
 .DS_Store
+
+# Secrets — local Anthropic key file from the take-home, and all .env files
 anthropic_api_key.txt
+.env
+.env.local
+.env.*.local
+
+# Bun / Node
+node_modules/
+bun.lock.bak
+
+# Build output
+dist/
+.next/
+out/
+
+# Runtime
+backend/uploads/
+*.log
+
+# Editors
+.vscode/
+.idea/
+
+# Husky internal (managed by husky itself)
+.husky/_/
