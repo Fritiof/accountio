@@ -26,3 +26,4 @@ backend/uploads/
 
 # Husky internal (managed by husky itself)
 .husky/_/
+uploads-test/
