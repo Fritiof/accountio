@@ -13,7 +13,8 @@
       "**/out",
       "**/migrations",
       "**/bun.lock",
-      "**/.husky/_"
+      "**/.husky/_",
+      "**/next-env.d.ts"
     ]
   },
   "formatter": {
