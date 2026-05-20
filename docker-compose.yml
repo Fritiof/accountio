@@ -1,0 +1,73 @@
+# docker compose up --build  →  postgres + backend (Hono/Bun) + frontend (Next.js/Bun)
+# All three services support hot reload via bind-mounted source.
+# The user-facing URL is http://localhost:3000 (Next.js).
+# Backend is reachable directly at http://localhost:3001 for curl debugging.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-accountio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-accountio}
+      POSTGRES_DB: ${POSTGRES_DB:-accountio}
+    ports:
+      # Exposed on the host so backend can also be run natively against this DB.
+      - '5432:5432'
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-accountio}']
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      # Loads ANTHROPIC_API_KEY (etc.) from the repo root .env into the container.
+      # env_file values are not subject to shell-env override the way ${...} is.
+      - .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-accountio}:${POSTGRES_PASSWORD:-accountio}@postgres:5432/${POSTGRES_DB:-accountio}
+      ANTHROPIC_MODEL: claude-sonnet-4-6
+      PORT: '3001'
+      HOST: '0.0.0.0'
+      UPLOAD_DIR: /app/uploads
+      NODE_ENV: development
+    ports:
+      - '3001:3001'
+    volumes:
+      - ./backend:/app
+      # Anonymous volumes shadow the host bind mount so container-installed
+      # node_modules and .next caches aren't clobbered.
+      - /app/node_modules
+      - uploads:/app/uploads
+    command: sh -c "bun run db:migrate && bun run dev"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      BACKEND_URL: http://backend:3001
+      NODE_ENV: development
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+
+volumes:
+  pg_data:
+  uploads:
