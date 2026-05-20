@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { env } from './env.ts';
+import { accountsRoute } from './routes/accounts.ts';
 
 export function createApp(): Hono {
   const app = new Hono();
@@ -14,6 +15,8 @@ export function createApp(): Hono {
   }
 
   app.get('/health', (c) => c.json({ ok: true }));
+
+  app.route('/api/accounts', accountsRoute);
 
   return app;
 }
