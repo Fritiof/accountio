@@ -88,13 +88,25 @@ export function assertBalanced(postings: ReadonlyArray<ValidatorPosting>): void 
       issues.push(`posting[${i}]: ${(err as Error).message}`);
       continue;
     }
-    if (debit < 0) issues.push(`posting[${i}]: negative debit (${p.debit})`);
-    if (credit < 0) issues.push(`posting[${i}]: negative credit (${p.credit})`);
+    let invalidSign = false;
+    if (debit < 0) {
+      issues.push(`posting[${i}]: negative debit (${p.debit})`);
+      invalidSign = true;
+    }
+    if (credit < 0) {
+      issues.push(`posting[${i}]: negative credit (${p.credit})`);
+      invalidSign = true;
+    }
     if (debit === 0 && credit === 0) {
       issues.push(`posting[${i}]: both debit and credit are zero`);
     }
-    totalDebit += debit;
-    totalCredit += credit;
+    // Skip accumulating signed-wrong postings — otherwise the running total
+    // can spuriously balance to zero when negatives cancel positives, and the
+    // UI ends up showing "balanced ✓" alongside a "negative debit" warning.
+    if (!invalidSign) {
+      totalDebit += debit;
+      totalCredit += credit;
+    }
   }
 
   if (totalDebit !== totalCredit) {

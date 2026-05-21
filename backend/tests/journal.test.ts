@@ -105,6 +105,32 @@ describe('assertBalanced', () => {
     ).toThrow(/negative debit/);
   });
 
+  test('does not let negatives cancel out the balance check', () => {
+    // If a negative debit were accumulated into the running total, the balance
+    // could spuriously appear correct (-500 + 500 = 0 = credits). Then the UI
+    // would show "balanced ✓" alongside the "negative debit" warning. The
+    // negative-sign issue must dominate.
+    let error: JournalValidationError | null = null;
+    try {
+      assertBalanced([
+        { accountNumber: '5010', debit: '-500', credit: '0' },
+        { accountNumber: '5010', debit: '500', credit: '0' },
+        { accountNumber: '2440', debit: '0', credit: '0' }, // would-be balancing zero credit
+      ]);
+    } catch (err) {
+      if (err instanceof JournalValidationError) error = err;
+      else throw err;
+    }
+    expect(error).not.toBeNull();
+    if (error) {
+      const text = error.issues.join(' ');
+      expect(text).toMatch(/negative debit/);
+      // Crucially, the balance check must also fail — the totals should NOT
+      // come out equal because the invalid posting is skipped.
+      expect(text).toMatch(/unbalanced/);
+    }
+  });
+
   test('throws on negative credit', () => {
     expect(() =>
       assertBalanced([
