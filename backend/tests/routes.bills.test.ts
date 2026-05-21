@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
  * The JournalGenerator is stubbed via the DI seam in createApp — no real
  * Anthropic API calls.
  */
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
@@ -22,7 +23,17 @@ import {
 
 const sql = postgres(env.DATABASE_URL, { max: 1 });
 
-const SAMPLE_PDF_PATH = join(import.meta.dir, '..', '..', 'sample_invoices', 'simple_invoice.pdf');
+// sample_invoices/ lives at the repo root locally, but is mounted at
+// /app/sample_invoices when running inside the backend docker container.
+const SAMPLE_PDF_NATIVE = join(
+  import.meta.dir,
+  '..',
+  '..',
+  'sample_invoices',
+  'simple_invoice.pdf',
+);
+const SAMPLE_PDF_DOCKER = join(import.meta.dir, '..', 'sample_invoices', 'simple_invoice.pdf');
+const SAMPLE_PDF_PATH = existsSync(SAMPLE_PDF_NATIVE) ? SAMPLE_PDF_NATIVE : SAMPLE_PDF_DOCKER;
 
 beforeAll(async () => {
   await migrate(db, { migrationsFolder: './src/db/migrations' });

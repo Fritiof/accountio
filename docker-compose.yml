@@ -51,6 +51,8 @@ services:
       # node_modules and .next caches aren't clobbered.
       - /app/node_modules
       - uploads:/app/uploads
+      # Sample invoices are read inside the backend container by route tests.
+      - ./sample_invoices:/app/sample_invoices:ro
     command: sh -c "bun run db:migrate && bun run dev"
 
   frontend:
