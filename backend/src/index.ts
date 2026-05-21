@@ -6,6 +6,7 @@ import { env } from './env.ts';
 import { type JournalGenerator, createAnthropicJournalGenerator } from './lib/anthropic.ts';
 import { createAccountsRoute } from './routes/accounts.ts';
 import { type BillsRouteDeps, createBillsRoute } from './routes/bills.ts';
+import { createSuppliersRoute } from './routes/suppliers.ts';
 
 export function createApp(deps?: Partial<BillsRouteDeps>): Hono {
   const app = new Hono();
@@ -28,6 +29,7 @@ export function createApp(deps?: Partial<BillsRouteDeps>): Hono {
 
   const dbInstance = deps?.db ?? db;
   app.route('/api/accounts', createAccountsRoute(dbInstance));
+  app.route('/api/suppliers', createSuppliersRoute(dbInstance));
   app.route('/api/bills', createBillsRoute({ db: dbInstance, generateJournal }));
 
   return app;
