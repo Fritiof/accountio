@@ -10,10 +10,11 @@ Built as a take-home assignment — see [interview.md](interview.md) for the ori
 
 1. Accountant uploads a supplier invoice PDF.
 2. Backend stores the PDF and sends it natively (as a `document` content block) to **Claude Sonnet 4.6** alongside the BAS chart and the Swedish supplier-invoice booking rules.
-3. Claude returns a structured journal entry (via tool use) — typically debit expense at net + debit `2640 Ingående moms` at VAT + credit `2440 Leverantörsskulder` at gross.
-4. Backend validates the proposal: balance to the cent, every account number must exist in the chart.
-5. Bill + journal entry + postings are persisted in Postgres in a single transaction.
-6. Frontend renders the PDF and the proposal side-by-side; the accountant approves or rejects.
+3. Claude returns a structured journal entry (via tool use) — typically debit expense at net + debit `2640 Ingående moms` at VAT + credit `2440 Leverantörsskulder` at gross — plus the supplier's name, org.nr, and VAT number.
+4. Backend looks up the supplier by org.nr → VAT number → name and surfaces the best match (or top-N candidates, or none).
+5. **Confirmation page**: the user picks the matched supplier or creates a new one from the PDF-extracted fields. Nothing has touched the `bills` table yet — only a short-lived draft row.
+6. On confirm, the backend validates the proposal (balance to the cent, every account in the chart), then persists supplier link + bill + journal entry + postings in a single transaction.
+7. Frontend renders the PDF and the proposal side-by-side; the accountant approves or rejects.
 
 ## Stack
 
@@ -23,7 +24,7 @@ Built as a take-home assignment — see [interview.md](interview.md) for the ori
 | Backend | Hono + Drizzle + Postgres 18 |
 | LLM | `@anthropic-ai/sdk` — Claude Sonnet 4.6 with native PDF document blocks and tool-use |
 | Frontend | Next.js 16 (App Router) + React 19 + Tailwind 4 + minimal shadcn |
-| Tests | `bun test` (built-in) — 35 tests, no Jest/Vitest |
+| Tests | `bun test` (built-in) — 61 tests across 4 files, no Jest/Vitest |
 | Lint / format | Biome (single binary, no ESLint/Prettier) |
 | Pre-commit | Husky + lint-staged — blocks commits with `any`, type errors, or formatting drift |
 
@@ -45,7 +46,7 @@ cp frontend/.env.example frontend/.env.local
 docker compose up --build
 ```
 
-Open **http://localhost:3000**. Click **Upload invoice**, pick `sample_invoices/simple_invoice.pdf`, wait ~10 s, review the proposal, click **Approve**.
+Open **http://localhost:3000**. Click **Upload invoice**, pick `sample_invoices/simple_invoice.pdf`, wait ~10 s while Claude extracts the journal entry, then on the confirmation screen pick **Confirm and book** to create the supplier (first time) or use the matched one (subsequent uploads of invoices from the same supplier). Review the proposal on the next page and click **Approve**.
 
 ## Quickstart — Local (apps native, just postgres in docker)
 
@@ -83,11 +84,45 @@ The `.env.example` files use `localhost` defaults so both modes work out of the 
                                           ▼                              ▼                      ▼
                                    ┌────────────┐               ┌──────────────────┐   ┌────────────────────┐
                                    │ Postgres   │               │  Anthropic API   │   │  Uploads volume    │
-                                   │ 16 (drizzle)│              │  Claude Sonnet 4.6│  │  (PDFs, mounted)   │
+                                   │ 18 (drizzle)│              │  Claude Sonnet 4.6│  │  (PDFs, mounted)   │
                                    └────────────┘               └──────────────────┘   └────────────────────┘
 ```
 
 The browser only ever talks to the Next.js origin. `next.config.ts` `rewrites` proxy `/api/*` to the backend over the docker network — no CORS, no exposed internal URLs in client code.
+
+Upload happens in two stages so each invoice is explicitly tied to a supplier:
+
+```
+   Browser                       Backend                      Postgres
+      │                             │                            │
+      │ POST /api/bills/prepare     │                            │
+      │ (PDF)                       │                            │
+      │ ───────────────────────────▶│                            │
+      │                             │ call Claude                │
+      │                             │ ───── ANTHROPIC ─────▶     │
+      │                             │ ◀──── proposal ────        │
+      │                             │ findSupplierMatch          │
+      │                             │ ─────────────────────────▶ │
+      │                             │ insert bill_draft          │
+      │                             │ ─────────────────────────▶ │
+      │ ◀───── { draftId, proposal, match } ─────────────────────│
+      │                             │                            │
+      │ render confirm page         │                            │
+      │ (user picks supplier)       │                            │
+      │                             │                            │
+      │ POST /api/bills/confirm     │                            │
+      │ (draftId, supplier choice)  │                            │
+      │ ───────────────────────────▶│                            │
+      │                             │ resolve supplier (existing │
+      │                             │   id or create new)        │
+      │                             │ validate proposal          │
+      │                             │ insert bill + entry +      │
+      │                             │   postings (transaction)   │
+      │                             │ delete draft               │
+      │                             │ ─────────────────────────▶ │
+      │ ◀───── { bill, journalEntry, postings } ─────────────────│
+      │ navigate to /bills/:id      │                            │
+```
 
 ## API
 
