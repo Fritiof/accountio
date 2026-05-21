@@ -355,7 +355,7 @@ The shape of the fixes is roughly "validate at the edge, give better errors" —
 - PDFs live on a local volume tied to one backend instance — horizontally scaling the API requires moving to object storage. Same section above covers the swap.
 - No authentication — anyone hitting `localhost` can upload and approve.
 - No multi-tenant data isolation.
-- Suppliers are read-only in the UI — no edit/delete/merge. Only the prepare/confirm flow writes to the `suppliers` table.
+- Supplier UI is intentionally thin for v1. The `/suppliers/[id]` page exists but only shows name + org/VAT + invoice count. Next pass: a `/suppliers` index with search, an inline edit form on the detail page (PATCH `/api/suppliers/:id` doesn't exist yet — the API is read-only), a bill-history list per supplier, and a merge action for the inevitable duplicates that creep in when org/VAT numbers weren't extracted from early invoices. The matching lib already gives us the pieces for surfacing merge candidates.
 - Currency is whatever Claude reports from the PDF; no FX conversion if the bill is in EUR/USD.
 - VAT handling only covers the standard Swedish-domestic case. Reverse charge, intra-community acquisitions, non-EU services and imports are not modeled — see [Accounting model › What this VAT model doesn't handle](#what-this-vat-model-doesnt-handle).
 - No audit log of approve/reject decisions beyond the `decided_at` timestamp.
