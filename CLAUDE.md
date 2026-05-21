@@ -95,4 +95,4 @@ Never hardcode hosts/ports/URLs. Read everything from env. Defaults in `backend/
 
 ## Sample PDF
 
-The take-home shipped with `simple_invoice.pdf` in the repo root. Use it for manual E2E checks and as a reference fixture.
+Sample PDFs live in `sample_invoices/` — `simple_invoice.pdf` is the one shipped with the take-home. Use them for manual E2E checks and as reference fixtures. Drop additional test PDFs into the same folder.

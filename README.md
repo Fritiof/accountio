@@ -45,7 +45,7 @@ cp frontend/.env.example frontend/.env.local
 docker compose up --build
 ```
 
-Open **http://localhost:3000**. Click **Upload invoice**, pick `simple_invoice.pdf` (in the repo root), wait ~10 s, review the proposal, click **Approve**.
+Open **http://localhost:3000**. Click **Upload invoice**, pick `sample_invoices/simple_invoice.pdf`, wait ~10 s, review the proposal, click **Approve**.
 
 ## Quickstart — Local (apps native, just postgres in docker)
 

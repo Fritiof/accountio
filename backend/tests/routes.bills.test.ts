@@ -21,7 +21,7 @@ import {
 
 const sql = postgres(env.DATABASE_URL, { max: 1 });
 
-const SAMPLE_PDF_PATH = join(import.meta.dir, '..', '..', 'simple_invoice.pdf');
+const SAMPLE_PDF_PATH = join(import.meta.dir, '..', '..', 'sample_invoices', 'simple_invoice.pdf');
 
 beforeAll(async () => {
   await migrate(db, { migrationsFolder: './src/db/migrations' });
