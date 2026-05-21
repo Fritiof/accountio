@@ -142,6 +142,20 @@ For every supplier invoice with Swedish VAT (moms):
 
 Sum of all debits must equal sum of all credits to the cent. Validators in [`backend/src/lib/journal.ts`](backend/src/lib/journal.ts) enforce this with integer-cent arithmetic (no float drift) before anything is persisted. If validation fails the entry is still saved with `status='pending'` and `validation_errors` populated so the UI can surface the issue.
 
+### What this VAT model doesn't handle
+
+The current setup assumes a Swedish supplier charging standard Swedish VAT. It will likely book the following cases incorrectly:
+
+- **Reverse charge (omvänd skattskyldighet)** — construction services and most EU B2B services. Buyer self-accounts the VAT, which in BAS typically uses `2614` (utgående moms) + `2645` (beräknad ingående moms). Neither account is in the 20-row chart we ship, so even if Claude detects the case it can't book it.
+- **Intra-community acquisitions** — goods purchased from a VAT-registered supplier in another EU country. Same self-accounting pattern (`2615` + `2645`), same missing-accounts problem.
+- **Non-EU services** — supplier outside the EU charges no VAT on the invoice; buyer applies the reverse-charge rules above.
+- **Goods imported from outside the EU** — separate import-VAT scheme via Tullverket, distinct accounts again.
+- **VAT-exempt purchases** — financial, healthcare, education — should book net only with no input VAT, which the current prompt may still try to split.
+
+Closing the gap requires both **chart additions** (`2614`, `2615`, `2645`, possibly `2647`) and **prompt updates** (detect supplier country via VAT number prefix, recognize "omvänd skattskyldighet" / "reverse charge" / "0% VAT EU service" text, route to the right account pair). The validators don't need to change — debits and credits still balance, they're just on different accounts.
+
+Storing the supplier's VAT number on the `bills` row would help; today we parse only what Claude returns into the existing fields.
+
 ## LLM integration
 
 The whole prompt lives in [`backend/src/lib/anthropic.ts`](backend/src/lib/anthropic.ts). One call per upload:
@@ -283,5 +297,6 @@ See [CLAUDE.md](CLAUDE.md) — the rules for any human or AI agent contributing 
 - No authentication — anyone hitting `localhost` can upload and approve.
 - No multi-tenant data isolation.
 - Currency is whatever Claude reports from the PDF; no FX conversion if the bill is in EUR/USD.
+- VAT handling only covers the standard Swedish-domestic case. Reverse charge, intra-community acquisitions, non-EU services and imports are not modeled — see [Accounting model › What this VAT model doesn't handle](#what-this-vat-model-doesnt-handle).
 - No audit log of approve/reject decisions beyond the `decided_at` timestamp.
 - The reasoning text and validation errors are surfaced but the UI doesn't yet block approval of entries that failed validation — the accountant can override.
