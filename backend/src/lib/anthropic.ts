@@ -8,12 +8,45 @@
  * The generator is exposed as a function `JournalGenerator` so the bills routes
  * can accept it as an argument — the real implementation calls Anthropic, the
  * test stub returns a fixture. No module-level mocking needed.
+ *
+ * --- Why two schemas? (proposalSchema + TOOL_INPUT_SCHEMA below) ---
+ *
+ * `TOOL_INPUT_SCHEMA` is JSON Schema sent to Anthropic in `tools[].input_schema`.
+ * `proposalSchema` is the zod schema we re-validate the response with after it
+ * comes back. They're related but serve different jobs, on purpose.
+ *
+ * 1. Anthropic's tool schema is a *hint* to the model, not a hard contract
+ *    enforced by the API. Claude follows it most of the time but will
+ *    occasionally drop a field, emit a number where we expected a string,
+ *    or return fewer postings than `minItems` asks for. Without a second
+ *    line of defense, bad LLM output reaches our DB.
+ *
+ * 2. The split lets us be PERMISSIVE outward and STRICT inward. The canonical
+ *    example is the money fields: JSON Schema says `type: ['string', 'number']`
+ *    because Claude flips between `"123.45"` and `123.45` depending on context,
+ *    and zod then normalizes everything to string via `.transform()`. By the
+ *    time the proposal leaves this function every amount is guaranteed to be a
+ *    decimal string — which is what the validators and DB inserts expect.
+ *
+ * 3. zod features we depend on don't round-trip to JSON Schema cleanly:
+ *    `.transform()` and `.refine()` are silently dropped by any zod →
+ *    JSON-Schema converter. If we generated TOOL_INPUT_SCHEMA from
+ *    proposalSchema we'd lose the very normalizations that make zod useful.
+ *
+ * If/when we want to dedupe, the right direction is "derive JSON Schema from
+ * zod, then loosen specific fields by hand" — not the other way around. For
+ * ~50 lines of schema, hand-writing both is fine and arguably easier to read.
+ *
+ * If `proposalSchema.safeParse` fails, the route catches it as a generator
+ * failure, unlinks the orphaned PDF, and returns 502 — so bad output never
+ * reaches the database.
  */
 import Anthropic from '@anthropic-ai/sdk';
 import type { Tool } from '@anthropic-ai/sdk/resources/messages';
 import { z } from 'zod';
 import type { Account } from './accounts.ts';
 
+// Inner schema (strict — gates what flows into the route layer).
 const proposalPostingSchema = z.object({
   accountNumber: z.string(),
   accountName: z.string(),
@@ -76,6 +109,8 @@ ${chart.map((a) => `- ${a.number} ${a.name}`).join('\n')}
 const USER_PROMPT_TEXT =
   'Generate a balanced double-entry journal entry for this invoice using the provided BAS chart of accounts. Call the record_journal_entry tool exactly once.';
 
+// Outer schema (permissive — hint to Claude). Numbers/strings unions on amounts
+// are deliberate; proposalSchema's `.transform()` normalizes them to string.
 const TOOL_INPUT_SCHEMA: Tool.InputSchema = {
   type: 'object',
   required: [
