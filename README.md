@@ -330,6 +330,25 @@ See [CLAUDE.md](CLAUDE.md) — the rules for any human or AI agent contributing 
 - **No mocked Anthropic in dev/prod** — only via the DI seam in tests.
 - **Bun only** as the package manager. Lockfile is `bun.lock`.
 
+## Input handling caveats
+
+What we do today vs. what a production version would need. Honest accounting of where it fails loudly, fails quietly, or doesn't fail at all when it probably should.
+
+- **No file-size limit.** The route reads the whole upload into memory (`file.arrayBuffer()`), writes it to disk, then base64-encodes it for Anthropic. A 200 MB PDF would OOM the backend; even a 50 MB one wastes ~70 MB of base64 RAM before the API call. Anthropic's own per-request PDF limit is 32 MB. **Fix:** enforce e.g. 10 MB in the route (`if (file.size > MAX) throw 413`) and reject early.
+- **MIME-type check is advisory.** [`bills.ts`](backend/src/routes/bills.ts) rejects `file.type` if non-empty AND not `application/pdf` — but a client sending `Content-Type:` blank slips through, and `file.type` is just the client's claim. Anthropic will reject the document block, so we fail at 502 instead of 400/415. **Fix:** sniff the magic bytes (`%PDF-` at offset 0) before storing.
+- **Non-invoice PDFs (a book, a photo, a manual)** — Claude usually does the right thing here. Two branches:
+  1. Claude refuses to call the tool → backend throws "Claude did not return a tool_use block" → **502**. The user gets the message but it's not friendly.
+  2. Claude calls the tool with garbage (invented supplier, fabricated amounts). zod requires `postings: min(1)` so empty arrays bounce → **502**. If the garbage *parses*, the validators usually catch it as unbalanced or unknown account → bill persists as `pending` with `validation_errors`. The user has to spot it and reject.
+  - **Fix:** add a pre-check tool call ("is this a supplier invoice?") and short-circuit with a 422 if Claude says no. Or add a confidence-score field to the proposal schema and refuse below a threshold.
+- **Corrupted, encrypted, password-protected, or scanned-image PDFs.** Anthropic either errors or returns junk. Same 502 path. **Fix:** sniff for encryption flag in the PDF header; for scanned images, route through Claude with an OCR-aware prompt or pre-process with Tesseract.
+- **Long invoices (20+ line items).** `max_tokens: 4096` is fine for typical Swedish invoices but a multi-page expense report can produce a truncated tool input that fails zod parse → 502. **Fix:** bump `max_tokens` to e.g. 8192 and/or stream.
+- **Wrong amounts that happen to balance.** If Claude misreads `12,500.00` as `12,500.00` for one line and the others align, the validators see balance and persist quietly. The accountant has to compare visually. This is fundamental — no automated check can substitute for a human comparing PDF to postings — but a confidence score per posting could flag low-certainty rows.
+- **Missing required-on-the-row fields.** Most header fields (`supplierName`, `invoiceNumber`, dates) are nullable; we render `—` and proceed. Postings descriptions can be empty strings without the zod schema rejecting. **Fix:** tighten `description: z.string().min(1)` and surface the error before persist.
+- **Duplicate uploads.** Upload the same invoice twice → two separate bills, two journal entries, double-counted payables. There's no deduplication by file hash, invoice number, or amount. **Fix:** SHA-256 the bytes on upload, store on the bill row, reject prepare if a confirmed bill with the same hash exists (or surface as a candidate to the user).
+- **Slow LLM = client retry.** The single sync `/prepare` call takes 5–15 s. A flaky network or impatient user re-clicking creates duplicate drafts (cleaned up by the 1h TTL, but still wasted API calls). **Fix:** see [File storage › scaling to multiple API instances](#what-scaling-to-multiple-api-instances-would-need) for the queue + polling path.
+
+The shape of the fixes is roughly "validate at the edge, give better errors" — none require structural changes to the model.
+
 ## Known limitations / what I'd ship next
 
 - Single LLM call on the upload request blocks for ~5-15 s. A real product would queue this and stream results, but for the interview scope synchronous is fine. See [File storage › scaling to multiple API instances](#what-scaling-to-multiple-api-instances-would-need) for the migration path.
