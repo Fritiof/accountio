@@ -274,6 +274,31 @@ describe('POST /api/bills/confirm', () => {
     const after = await sql`SELECT count(*)::int as c FROM bill_drafts`;
     expect(after[0]?.c).toBe(0);
   });
+
+  test('concurrent confirms for the same draft produce exactly one bill', async () => {
+    // Regression test for the double-confirm race. Two POST /confirm calls
+    // fired in parallel against the same draftId; the atomic DELETE ...
+    // RETURNING inside the transaction means only one wins.
+    const app = createApp({ db, generateJournal: stub(balancedProposal) });
+    const prep = (await (await preparePdf(app)).json()) as PrepareResponse;
+
+    const [res1, res2] = await Promise.all([
+      confirmAsNewSupplier(app, prep.draftId, prep.proposal),
+      confirmAsNewSupplier(app, prep.draftId, prep.proposal),
+    ]);
+
+    // Exactly one 201 and one 404.
+    const statuses = [res1.status, res2.status].sort();
+    expect(statuses).toEqual([201, 404]);
+
+    // Exactly one bill in the DB, not two.
+    const billRows = await sql`SELECT count(*)::int as c FROM bills`;
+    expect(billRows[0]?.c).toBe(1);
+
+    // Draft is gone.
+    const draftRows = await sql`SELECT count(*)::int as c FROM bill_drafts`;
+    expect(draftRows[0]?.c).toBe(0);
+  });
 });
 
 // =============================================================================

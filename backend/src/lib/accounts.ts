@@ -10,7 +10,7 @@
  * - 2440 Leverantörsskulder — credited at gross for supplier payables
  * - 2640 Ingående moms — debited at the VAT (moms) amount on supplier invoices
  */
-import type { DB } from '../db/client.ts';
+import type { DBOrTx } from '../db/client.ts';
 import { accounts } from '../db/schema.ts';
 
 export type Account = {
@@ -52,8 +52,8 @@ export function isValidAccount(number: string): boolean {
   return BY_NUMBER.has(number);
 }
 
-/** Read the live chart from the database. */
-export async function loadChart(db: DB): Promise<Account[]> {
+/** Read the live chart from the database (or transaction). */
+export async function loadChart(db: DBOrTx): Promise<Account[]> {
   const rows = await db
     .select({ number: accounts.number, name: accounts.name })
     .from(accounts)

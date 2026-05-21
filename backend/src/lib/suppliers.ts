@@ -12,7 +12,7 @@
  * so equality matches don't need to lowercase at query time.
  */
 import { eq, ilike, sql } from 'drizzle-orm';
-import type { DB } from '../db/client.ts';
+import type { DB, DBOrTx } from '../db/client.ts';
 import { type Supplier, suppliers } from '../db/schema.ts';
 
 export type MatchInput = {
@@ -49,7 +49,7 @@ export function normalizeName(input: string | null | undefined): string | null {
   return collapsed === '' ? null : collapsed;
 }
 
-export async function findSupplierMatch(db: DB, input: MatchInput): Promise<MatchResult> {
+export async function findSupplierMatch(db: DBOrTx, input: MatchInput): Promise<MatchResult> {
   const org = normalizeOrgNumber(input.orgNumber);
   const vat = normalizeVatNumber(input.vatNumber);
   const name = normalizeName(input.name);

@@ -20,12 +20,12 @@ import { desc, eq, lt } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
-import type { DB } from '../db/client.ts';
+import type { DB, DBOrTx } from '../db/client.ts';
 import { billDrafts, bills, journalEntries, postings, suppliers } from '../db/schema.ts';
 import { loadChart } from '../lib/accounts.ts';
 import type { JournalGenerator, JournalProposal } from '../lib/anthropic.ts';
 import { JournalValidationError, assertAccountsValid, assertBalanced } from '../lib/journal.ts';
-import { resolveStoragePath, storePdf } from '../lib/storage.ts';
+import { readStoredFile, resolveStoragePath, storePdf } from '../lib/storage.ts';
 import {
   findSupplierMatch,
   normalizeName,
@@ -193,40 +193,56 @@ export function createBillsRoute(deps: BillsRouteDeps): Hono {
     }
     const body = parsed.data;
 
-    const [draft] = await db
-      .select()
+    // Pre-check: if the draft is expired, clean up the PDF and return 410.
+    // This is best-effort — between this check and the atomic claim below
+    // the draft could expire, but that's harmless (the bill still gets
+    // created and the sweep job cleans the row later).
+    const [check] = await db
+      .select({ expiresAt: billDrafts.expiresAt, storagePath: billDrafts.storagePath })
       .from(billDrafts)
       .where(eq(billDrafts.id, body.draftId))
       .limit(1);
-    if (!draft) throw new HTTPException(404, { message: 'Draft not found.' });
-    if (draft.expiresAt.getTime() < Date.now()) {
-      // Clean up and tell the caller to re-upload.
-      await deleteDraftAndPdf(db, draft.id, draft.storagePath);
+    if (!check) throw new HTTPException(404, { message: 'Draft not found.' });
+    if (check.expiresAt.getTime() < Date.now()) {
+      await deleteDraftAndPdf(db, body.draftId, check.storagePath);
       throw new HTTPException(410, { message: 'Draft has expired; re-upload required.' });
     }
 
-    const proposal = draft.proposalJson as JournalProposal;
-
-    // Resolve or create the supplier.
-    const supplierId = await resolveSupplier(db, body.supplier);
-
-    // Re-run validators authoritatively at confirm time.
-    const validationIssues: string[] = [];
-    const chart = await loadChart(db);
-    try {
-      assertAccountsValid(proposal.postings, chart);
-    } catch (err) {
-      if (err instanceof JournalValidationError) validationIssues.push(...err.issues);
-      else throw err;
-    }
-    try {
-      assertBalanced(proposal.postings);
-    } catch (err) {
-      if (err instanceof JournalValidationError) validationIssues.push(...err.issues);
-      else throw err;
-    }
-
+    // Atomic-claim + persist in one transaction. The DELETE ... RETURNING
+    // is the claim: if a second concurrent /confirm tries the same draftId,
+    // it gets zero rows back and 404s. Without this, two SELECT-only checks
+    // could both pass and both commit a bill (double-counted payable).
     const detail = await db.transaction(async (tx) => {
+      const [draft] = await tx
+        .delete(billDrafts)
+        .where(eq(billDrafts.id, body.draftId))
+        .returning();
+      if (!draft) {
+        throw new HTTPException(404, { message: 'Draft not found or already claimed.' });
+      }
+
+      const proposal = draft.proposalJson as JournalProposal;
+
+      // Supplier resolution and chart load both run inside the tx — that
+      // way a new supplier inserted here is visible to the foreign-key
+      // check on the bill insert without crossing transaction boundaries.
+      const supplierId = await resolveSupplier(tx, body.supplier);
+
+      const validationIssues: string[] = [];
+      const chart = await loadChart(tx);
+      try {
+        assertAccountsValid(proposal.postings, chart);
+      } catch (err) {
+        if (err instanceof JournalValidationError) validationIssues.push(...err.issues);
+        else throw err;
+      }
+      try {
+        assertBalanced(proposal.postings);
+      } catch (err) {
+        if (err instanceof JournalValidationError) validationIssues.push(...err.issues);
+        else throw err;
+      }
+
       const [insertedBill] = await tx
         .insert(bills)
         .values({
@@ -276,9 +292,6 @@ export function createBillsRoute(deps: BillsRouteDeps): Hono {
           })),
         )
         .returning();
-
-      // PDF stays at the same storage_path; only delete the draft row.
-      await tx.delete(billDrafts).where(eq(billDrafts.id, draft.id));
 
       return { bill: insertedBill, journalEntry: insertedEntry, postings: postingRows };
     });
@@ -335,7 +348,7 @@ export function createBillsRoute(deps: BillsRouteDeps): Hono {
 // ----- helpers ------------------------------------------------------------
 
 async function streamPdf(storagePath: string, mimeType: string, originalName: string) {
-  const file = Bun.file(resolveStoragePath(storagePath));
+  const file = readStoredFile(storagePath);
   if (!(await file.exists())) {
     throw new HTTPException(410, { message: 'PDF no longer available.' });
   }
@@ -386,7 +399,7 @@ async function sweepExpiredDrafts(db: DB) {
  *   (another request just created the same identifier), re-query and use that.
  */
 async function resolveSupplier(
-  db: DB,
+  db: DBOrTx,
   choice: z.infer<typeof confirmBodySchema>['supplier'],
 ): Promise<string> {
   if (choice.kind === 'existing') {
@@ -402,15 +415,24 @@ async function resolveSupplier(
     throw new HTTPException(400, { message: 'Supplier name is required.' });
   }
 
-  try {
-    const [created] = await db.insert(suppliers).values({ name, orgNumber, vatNumber }).returning();
-    if (!created) throw new Error('Failed to insert supplier');
-    return created.id;
-  } catch (err) {
-    // Unique violation — race with another request. Look up by whichever
-    // identifier we have and use the existing row.
-    const match = await findSupplierMatch(db, { orgNumber, vatNumber, name });
-    if (match.kind === 'exact') return match.supplier.id;
-    throw err;
-  }
+  // Use ON CONFLICT DO NOTHING so a unique-violation on org_number or
+  // vat_number doesn't abort the surrounding transaction (which is what a
+  // raw INSERT + try/catch would do — Postgres flags the tx aborted on the
+  // first error and rejects every subsequent statement until ROLLBACK).
+  // If the insert was skipped because of a conflict, fall back to a lookup.
+  const [created] = await db
+    .insert(suppliers)
+    .values({ name, orgNumber, vatNumber })
+    .onConflictDoNothing()
+    .returning();
+  if (created) return created.id;
+
+  // Conflict — another row already has this org or VAT. Look it up.
+  const match = await findSupplierMatch(db, { orgNumber, vatNumber, name });
+  if (match.kind === 'exact') return match.supplier.id;
+  // We hit a conflict but can't find the conflicting row by our criteria —
+  // shouldn't be reachable in practice; treat as 409.
+  throw new HTTPException(409, {
+    message: 'Supplier identifiers conflict with an existing record we could not resolve.',
+  });
 }
