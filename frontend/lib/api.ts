@@ -55,4 +55,13 @@ export async function listSuppliers(query?: string): Promise<Supplier[]> {
   return data.suppliers;
 }
 
+export async function getSupplier(
+  id: string,
+): Promise<{ supplier: Supplier; billCount: number } | null> {
+  const res = await fetch(resolveUrl(`/api/suppliers/${id}`), { cache: 'no-store' });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`GET /api/suppliers/${id} → ${res.status}`);
+  return (await res.json()) as { supplier: Supplier; billCount: number };
+}
+
 export type { JournalProposal, PrepareResponse, Supplier, SupplierMatch };

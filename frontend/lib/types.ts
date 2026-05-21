@@ -59,6 +59,7 @@ export type Bill = {
   storagePath: string;
   mimeType: string;
   sizeBytes: number;
+  supplierId: string;
   supplierName: string | null;
   supplierOrgNumber: string | null;
   supplierVatNumber: string | null;

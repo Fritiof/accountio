@@ -44,7 +44,14 @@ export default async function BillDetailPage({ params }: { params: Promise<{ id:
           <div className="rounded-lg border p-4">
             <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
               <div className="text-(--color-muted-foreground)">Supplier</div>
-              <div className="text-right font-medium">{bill.supplierName ?? '—'}</div>
+              <div className="text-right">
+                <Link
+                  href={`/suppliers/${bill.supplierId}`}
+                  className="font-medium underline-offset-4 hover:underline"
+                >
+                  {bill.supplierName ?? '—'}
+                </Link>
+              </div>
 
               <div className="text-(--color-muted-foreground)">Org. no.</div>
               <div className="text-right font-mono">{bill.supplierOrgNumber ?? '—'}</div>
