@@ -20,7 +20,7 @@ Built as a take-home assignment — see [interview.md](interview.md) for the ori
 | Layer | Choice |
 |---|---|
 | Runtime | Bun (runs TypeScript natively, no transpile step) |
-| Backend | Hono + Drizzle + Postgres 16 |
+| Backend | Hono + Drizzle + Postgres 18 |
 | LLM | `@anthropic-ai/sdk` — Claude Sonnet 4.6 with native PDF document blocks and tool-use |
 | Frontend | Next.js 16 (App Router) + React 19 + Tailwind 4 + minimal shadcn |
 | Tests | `bun test` (built-in) — 35 tests, no Jest/Vitest |

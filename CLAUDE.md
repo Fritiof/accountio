@@ -16,7 +16,7 @@ See [interview.md](interview.md) for the original spec.
 | Backend lang | TypeScript (`strict`) | Type safety; `any` is forbidden. |
 | HTTP | Hono | Tiny, fast, Bun-native ergonomics, easy in-process testing via `app.request()`. |
 | ORM | Drizzle + drizzle-kit | TypeScript-first, SQL-shaped, clean migrations. |
-| DB | Postgres 16 | Relational data fits the journal/postings shape; matches docker compose vibe. |
+| DB | Postgres 18 | Relational data fits the journal/postings shape; matches docker compose vibe. |
 | LLM | `@anthropic-ai/sdk` (Claude Sonnet 4.6) | Native PDF document blocks + tool-use for structured output. |
 | Frontend | Next.js 16 (App Router) + React 19 | Server components for data fetching, client islands for interactivity. |
 | Styling | Tailwind + shadcn/ui | Fast, accessible primitives, easy to extend live. |
