@@ -24,6 +24,7 @@ const proposalPostingSchema = z.object({
 
 const proposalSchema = z.object({
   supplierName: z.string().nullable(),
+  supplierOrgNumber: z.string().nullable(),
   supplierVatNumber: z.string().nullable(),
   invoiceNumber: z.string().nullable(),
   invoiceDate: z.string().nullable(),
@@ -60,7 +61,10 @@ function buildSystemPrompt(chart: ReadonlyArray<Account>): string {
 - All amounts must be in the invoice's currency (do not convert).
 - Each posting must have a non-empty \`description\`. Set the side that doesn't apply to "0".
 - Dates must be ISO format YYYY-MM-DD.
-- Capture the supplier's tax identifier as \`supplierVatNumber\` — typically a Swedish VAT number ("SE" + 12 digits, e.g. \`SE556677889901\`) or an organisationsnummer ("556677-8899"). Use whatever form is printed on the invoice; null if not present.
+- Capture the supplier's tax identifiers in two separate fields:
+  - \`supplierOrgNumber\` — Swedish 10-digit organisationsnummer in the format "556677-8899". Null if not Swedish or not printed.
+  - \`supplierVatNumber\` — country-prefixed VAT registration number, e.g. "SE556677889901" or "DE123456789". Null if not printed.
+  - Some invoices print both, some print only one. Capture each in its own field — never put a VAT number in the org-number field or vice versa.
 - Provide a one-paragraph \`reasoning\` explaining the account choices.
 
 # BAS chart of accounts
@@ -76,6 +80,7 @@ const TOOL_INPUT_SCHEMA: Tool.InputSchema = {
   type: 'object',
   required: [
     'supplierName',
+    'supplierOrgNumber',
     'supplierVatNumber',
     'invoiceNumber',
     'invoiceDate',
@@ -89,9 +94,15 @@ const TOOL_INPUT_SCHEMA: Tool.InputSchema = {
   ],
   properties: {
     supplierName: { type: ['string', 'null'] },
+    supplierOrgNumber: {
+      type: ['string', 'null'],
+      description:
+        'Swedish 10-digit organisationsnummer, e.g. "556677-8899". Null if not Swedish or not printed.',
+    },
     supplierVatNumber: {
       type: ['string', 'null'],
-      description: 'Supplier VAT or organisationsnummer as printed on the invoice.',
+      description:
+        'Country-prefixed VAT registration number, e.g. "SE556677889901". Null if not printed.',
     },
     invoiceNumber: { type: ['string', 'null'] },
     invoiceDate: { type: ['string', 'null'], description: 'ISO YYYY-MM-DD or null.' },

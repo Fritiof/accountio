@@ -46,7 +46,10 @@ export default async function BillDetailPage({ params }: { params: Promise<{ id:
               <div className="text-(--color-muted-foreground)">Supplier</div>
               <div className="text-right font-medium">{bill.supplierName ?? '—'}</div>
 
-              <div className="text-(--color-muted-foreground)">VAT / org. no.</div>
+              <div className="text-(--color-muted-foreground)">Org. no.</div>
+              <div className="text-right font-mono">{bill.supplierOrgNumber ?? '—'}</div>
+
+              <div className="text-(--color-muted-foreground)">VAT no.</div>
               <div className="text-right font-mono">{bill.supplierVatNumber ?? '—'}</div>
 
               <div className="text-(--color-muted-foreground)">Invoice no.</div>

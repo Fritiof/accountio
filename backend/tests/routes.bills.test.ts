@@ -78,6 +78,7 @@ describe('POST /api/bills', () => {
       bill: {
         id: string;
         supplierName: string;
+        supplierOrgNumber: string;
         supplierVatNumber: string;
         grossAmount: string;
       };
@@ -86,6 +87,7 @@ describe('POST /api/bills', () => {
     };
 
     expect(body.bill.supplierName).toBe('Acme Consulting AB');
+    expect(body.bill.supplierOrgNumber).toBe('556677-8899');
     expect(body.bill.supplierVatNumber).toBe('SE556677889901');
     expect(body.bill.grossAmount).toBe('12500.00');
     expect(body.journalEntry.status).toBe('pending');

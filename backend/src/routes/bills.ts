@@ -101,6 +101,7 @@ export function createBillsRoute(deps: BillsRouteDeps): Hono {
           mimeType: 'application/pdf',
           sizeBytes: stored.sizeBytes,
           supplierName: proposal.supplierName,
+          supplierOrgNumber: proposal.supplierOrgNumber,
           supplierVatNumber: proposal.supplierVatNumber,
           invoiceNumber: proposal.invoiceNumber,
           invoiceDate: proposal.invoiceDate,
