@@ -91,26 +91,56 @@ The browser only ever talks to the Next.js origin. `next.config.ts` `rewrites` p
 
 ## API
 
+Upload is a two-stage flow so each bill is explicitly tied to a supplier:
+
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/bills` | multipart upload → store PDF → call Claude → validate → insert → return detail JSON |
+| `POST` | `/api/bills/prepare` | multipart upload → store PDF → call Claude → look up supplier match → return `{ draftId, proposal, match }`. Nothing in `bills` yet. |
+| `POST` | `/api/bills/confirm` | body `{ draftId, supplier }` where supplier is `{ kind: 'existing', id }` or `{ kind: 'create', name, orgNumber, vatNumber }`. Resolves the supplier, creates bill + journal entry + postings in one transaction, deletes the draft. |
+| `GET`  | `/api/bills/drafts/:id` | JSON shape for the confirm page (`{ proposal, match }` — match is re-computed on each fetch). 410 if expired. |
+| `GET`  | `/api/bills/drafts/:id/pdf` | streams the draft PDF for the confirm-page preview. |
+| `DELETE` | `/api/bills/drafts/:id` | abandons a draft (deletes the PDF + the row). |
+
+Once a bill is confirmed it shows up via the existing read endpoints:
+
+| Method | Path | Purpose |
+|--------|------|---------|
 | `GET`  | `/api/bills` | list newest first, with journal-entry status |
 | `GET`  | `/api/bills/:id` | full detail (bill + journal entry + postings) |
 | `GET`  | `/api/bills/:id/pdf` | streams the stored PDF inline |
 | `POST` | `/api/bills/:id/approve` | flip status to `approved` (idempotent) |
 | `POST` | `/api/bills/:id/reject`  | flip status to `rejected` (idempotent) |
+| `GET`  | `/api/suppliers` | list suppliers, optional `?q=<substring>` search |
+| `GET`  | `/api/suppliers/:id` | single supplier + count of linked bills |
 | `GET`  | `/api/accounts` | returns the 20-row BAS chart |
 | `GET`  | `/health` | liveness probe |
 
 ## Data model
 
-Three tables (full schema in [`backend/src/db/schema.ts`](backend/src/db/schema.ts)):
+Six tables (full schema in [`backend/src/db/schema.ts`](backend/src/db/schema.ts)):
 
-- **`bills`** — PDF metadata + parsed header (supplier, dates, net/VAT/gross).
+- **`accounts`** — BAS chart of accounts (`number` PK, `name`). Seeded by migration 0001 with the 20 rows from the interview spec.
+- **`suppliers`** — `name`, `org_number`, `vat_number`, `notes`. Partial unique indexes on `org_number` and `vat_number` so two records can't share the same identifier.
+- **`bills`** — PDF metadata + invoice header snapshots (supplier name/org/VAT as captured by Claude) + a NOT NULL `supplier_id` FK to the resolved supplier.
+- **`bill_drafts`** — short-lived rows between prepare and confirm. Holds the PDF metadata + the proposal as `jsonb` + the best-match result. 1-hour TTL; swept on each `/prepare` call.
 - **`journal_entries`** — 1:1 with bill. `status` enum (`pending`/`approved`/`rejected`), Claude's `llm_reasoning`, and `validation_errors` if any. `decided_at` populated on approve/reject.
 - **`postings`** — N postings per entry. Each has `account_number` + `account_name`, `debit` and `credit` as `numeric(14,2)`, plus `description` and `sort_order`.
 
 Cascade deletes from bill → entry → postings.
+
+## Supplier matching
+
+When you upload an invoice, `/prepare` runs a matching lookup against the existing suppliers table. The priority is:
+
+1. **Exact org_number** (Swedish 10-digit `556677-8899`) — highest specificity.
+2. **Exact vat_number** (country-prefixed `SE556677889901`).
+3. **Exact name** (case-insensitive, whitespace-collapsed). If multiple suppliers share the exact name, all are returned as candidates for the user to disambiguate.
+4. **Partial-name candidates** — top 5 ILIKE matches if no exact identifier hit.
+5. **No match** — UI offers to create a new supplier pre-filled with the PDF's name/org/VAT.
+
+The matching is **never silent**: even on an exact match, the confirm page shows what was matched and offers a "Create new instead" escape hatch. The user always sees and approves the supplier link before any row is persisted.
+
+Implementation: [`backend/src/lib/suppliers.ts`](backend/src/lib/suppliers.ts) (pure module with 13 tests).
 
 ## File storage
 
@@ -175,10 +205,12 @@ cd backend
 bun test
 ```
 
-35 tests, ~450 ms:
+61 tests, ~700 ms across four files:
 
 - **`journal.test.ts`** (21 tests, pure) — toCents parsing, format round-trips, balance assertion, float-drift trap, negative debit rejection, BAS-chart membership, multi-issue aggregation.
-- **`routes.bills.test.ts`** (14 tests, HTTP-level against real Postgres) — upload happy path, validation-error paths (unbalanced + unknown account), 400 / 415 / 502 error paths, list, detail, PDF streaming, approve idempotency, reject, 404s.
+- **`suppliers.test.ts`** (13 tests, mostly pure) — normalize helpers, org wins over VAT, VAT falls back to name, candidates path for multiple exact-name matches and for partial-name, empty input → none.
+- **`routes.bills.test.ts`** (22 tests, HTTP-level against real Postgres) — prepare happy path with match=none vs match=exact-by-org, 400/415/502, confirm with existing supplier vs create-new, validation-error paths, 404 on unknown draft, draft delete + draft PDF stream, list/detail/approve/reject for confirmed bills.
+- **`routes.suppliers.test.ts`** (5 tests) — list empty, list all, ILIKE search, detail with bill count, 404.
 
 The Anthropic client is stubbed via the DI seam — tests don't touch the real API.
 
@@ -190,21 +222,26 @@ backend/
 │   ├── index.ts                 # Hono app + createApp factory
 │   ├── env.ts                   # zod-validated env loading
 │   ├── db/
-│   │   ├── schema.ts            # bills, journal_entries, postings
+│   │   ├── schema.ts            # accounts, suppliers, bills, bill_drafts,
+│   │   │                        # journal_entries, postings
 │   │   ├── client.ts            # drizzle(postgres.js) instance
 │   │   ├── migrate.ts           # standalone migration runner
-│   │   └── migrations/          # drizzle-kit generated
+│   │   └── migrations/          # drizzle-kit generated (+ chart seed)
 │   ├── lib/
-│   │   ├── accounts.ts          # BAS chart constant
+│   │   ├── accounts.ts          # BAS chart constant + loadChart(db)
+│   │   ├── suppliers.ts         # normalize helpers + findSupplierMatch
 │   │   ├── journal.ts           # balance + chart validators (pure)
 │   │   ├── anthropic.ts         # createAnthropicJournalGenerator + DI seam
 │   │   └── storage.ts           # PDF filesystem storage
 │   └── routes/
 │       ├── accounts.ts
-│       └── bills.ts             # all bill CRUD + approve/reject
+│       ├── suppliers.ts         # list + detail (read-only)
+│       └── bills.ts             # prepare, confirm, draft mgmt, CRUD, approve/reject
 ├── tests/
 │   ├── journal.test.ts          # pure validator tests
+│   ├── suppliers.test.ts        # matching + normalize tests
 │   ├── routes.bills.test.ts     # HTTP route tests
+│   ├── routes.suppliers.test.ts # supplier endpoints
 │   ├── fixtures/proposal.ts     # canned Claude proposals for stubbing
 │   └── setup.ts                 # preloaded via bunfig.toml
 ├── bunfig.toml
@@ -215,22 +252,25 @@ backend/
 frontend/
 ├── app/
 │   ├── layout.tsx
-│   ├── page.tsx                 # bills list + upload (server component)
-│   ├── bills/[id]/page.tsx      # detail (server component)
-│   └── globals.css              # Tailwind 4 @theme tokens
+│   ├── page.tsx                                  # bills list + upload (server)
+│   ├── bills/[id]/page.tsx                       # confirmed-bill detail
+│   ├── bills/confirm/[draftId]/page.tsx          # supplier confirmation
+│   ├── suppliers/[id]/page.tsx                   # supplier detail
+│   └── globals.css                               # Tailwind 4 @theme tokens
 ├── components/
-│   ├── upload-button.tsx        # 'use client' — file picker + POST
+│   ├── upload-button.tsx                         # 'use client' — POSTs to /prepare
+│   ├── confirm-supplier-form.tsx                 # 'use client' — match UI + create form
 │   ├── status-badge.tsx
 │   ├── journal-entry-table.tsx
-│   ├── approve-reject-actions.tsx  # 'use client' — POST + router.refresh()
-│   └── ui/button.tsx            # minimal shadcn-style primitive
+│   ├── approve-reject-actions.tsx                # 'use client' — POST + router.refresh()
+│   └── ui/button.tsx                             # minimal shadcn-style primitive
 ├── lib/
-│   ├── api.ts                   # typed fetch helpers
-│   ├── format.ts                # sv-SE money/date formatters
-│   ├── types.ts                 # API response shapes
-│   └── cn.ts                    # clsx + tailwind-merge
-├── next.config.ts               # rewrites /api/* → BACKEND_URL
-├── postcss.config.mjs           # @tailwindcss/postcss
+│   ├── api.ts                                    # typed fetch helpers
+│   ├── format.ts                                 # sv-SE money/date formatters
+│   ├── types.ts                                  # API response shapes
+│   └── cn.ts                                     # clsx + tailwind-merge
+├── next.config.ts                                # rewrites /api/* → BACKEND_URL
+├── postcss.config.mjs                            # @tailwindcss/postcss
 ├── tsconfig.json
 └── Dockerfile
 
@@ -296,6 +336,7 @@ See [CLAUDE.md](CLAUDE.md) — the rules for any human or AI agent contributing 
 - PDFs live on a local volume tied to one backend instance — horizontally scaling the API requires moving to object storage. Same section above covers the swap.
 - No authentication — anyone hitting `localhost` can upload and approve.
 - No multi-tenant data isolation.
+- Suppliers are read-only in the UI — no edit/delete/merge. Only the prepare/confirm flow writes to the `suppliers` table.
 - Currency is whatever Claude reports from the PDF; no FX conversion if the bill is in EUR/USD.
 - VAT handling only covers the standard Swedish-domestic case. Reverse charge, intra-community acquisitions, non-EU services and imports are not modeled — see [Accounting model › What this VAT model doesn't handle](#what-this-vat-model-doesnt-handle).
 - No audit log of approve/reject decisions beyond the `decided_at` timestamp.
