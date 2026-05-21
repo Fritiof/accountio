@@ -303,6 +303,32 @@ export function createBillsRoute(deps: BillsRouteDeps): Hono {
     return streamPdf(draft.storagePath, draft.mimeType, draft.originalName);
   });
 
+  // GET /api/bills/drafts/:id — JSON for the confirm page (server component fetches this).
+  route.get('/drafts/:id', async (c) => {
+    const id = c.req.param('id');
+    const [draft] = await db.select().from(billDrafts).where(eq(billDrafts.id, id)).limit(1);
+    if (!draft) throw new HTTPException(404, { message: 'Draft not found.' });
+    if (draft.expiresAt.getTime() < Date.now()) {
+      await deleteDraftAndPdf(db, draft.id, draft.storagePath);
+      throw new HTTPException(410, { message: 'Draft has expired; re-upload required.' });
+    }
+
+    // Re-run the match in case suppliers have changed since prepare.
+    const proposal = draft.proposalJson as JournalProposal;
+    const match = await findSupplierMatch(db, {
+      orgNumber: proposal.supplierOrgNumber,
+      vatNumber: proposal.supplierVatNumber,
+      name: proposal.supplierName,
+    });
+
+    return c.json({
+      draftId: draft.id,
+      originalName: draft.originalName,
+      proposal,
+      match,
+    });
+  });
+
   return route;
 }
 

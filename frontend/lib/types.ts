@@ -9,6 +9,50 @@ export type Account = {
   name: string;
 };
 
+export type Supplier = {
+  id: string;
+  name: string;
+  orgNumber: string | null;
+  vatNumber: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SupplierMatch =
+  | { kind: 'exact'; supplier: Supplier; matchedBy: 'org_number' | 'vat_number' | 'name' }
+  | { kind: 'candidates'; candidates: Supplier[] }
+  | { kind: 'none' };
+
+export type JournalProposalPosting = {
+  accountNumber: string;
+  accountName: string;
+  debit: string;
+  credit: string;
+  description: string;
+};
+
+export type JournalProposal = {
+  supplierName: string | null;
+  supplierOrgNumber: string | null;
+  supplierVatNumber: string | null;
+  invoiceNumber: string | null;
+  invoiceDate: string | null;
+  dueDate: string | null;
+  currency: string;
+  netAmount: string;
+  vatAmount: string;
+  grossAmount: string;
+  postings: JournalProposalPosting[];
+  reasoning: string;
+};
+
+export type PrepareResponse = {
+  draftId: string;
+  proposal: JournalProposal;
+  match: SupplierMatch;
+};
+
 export type Bill = {
   id: string;
   originalName: string;

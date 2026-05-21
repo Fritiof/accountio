@@ -3,7 +3,14 @@
  * BACKEND_URL) and by client components (via the same-origin Next.js
  * rewrite). The path stays `/api/...` in both cases.
  */
-import type { BillDetail, BillListItem } from './types.ts';
+import type {
+  BillDetail,
+  BillListItem,
+  JournalProposal,
+  PrepareResponse,
+  Supplier,
+  SupplierMatch,
+} from './types.ts';
 
 const BACKEND_URL = process.env.BACKEND_URL ?? 'http://localhost:3001';
 
@@ -27,3 +34,25 @@ export async function listBills(): Promise<BillListItem[]> {
 export async function getBillDetail(id: string): Promise<BillDetail> {
   return getJson<BillDetail>(`/api/bills/${id}`);
 }
+
+export type DraftDetail = {
+  draftId: string;
+  originalName: string;
+  proposal: JournalProposal;
+  match: SupplierMatch;
+};
+
+export async function getDraft(id: string): Promise<DraftDetail | null> {
+  const res = await fetch(resolveUrl(`/api/bills/drafts/${id}`), { cache: 'no-store' });
+  if (res.status === 404 || res.status === 410) return null;
+  if (!res.ok) throw new Error(`GET /api/bills/drafts/${id} → ${res.status}`);
+  return (await res.json()) as DraftDetail;
+}
+
+export async function listSuppliers(query?: string): Promise<Supplier[]> {
+  const url = query ? `/api/suppliers?q=${encodeURIComponent(query)}` : '/api/suppliers';
+  const data = await getJson<{ suppliers: Supplier[] }>(url);
+  return data.suppliers;
+}
+
+export type { JournalProposal, PrepareResponse, Supplier, SupplierMatch };

@@ -17,14 +17,13 @@ export function UploadButton() {
     try {
       const form = new FormData();
       form.append('file', file);
-      const res = await fetch('/api/bills', { method: 'POST', body: form });
+      const res = await fetch('/api/bills/prepare', { method: 'POST', body: form });
       if (!res.ok) {
         const msg = await res.text().catch(() => res.statusText);
         throw new Error(msg || `Upload failed (${res.status})`);
       }
-      const detail = (await res.json()) as { bill: { id: string } };
-      router.push(`/bills/${detail.bill.id}`);
-      router.refresh();
+      const { draftId } = (await res.json()) as { draftId: string };
+      router.push(`/bills/confirm/${draftId}`);
     } catch (err) {
       setError((err as Error).message);
     } finally {
