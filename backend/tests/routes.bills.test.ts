@@ -8,7 +8,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
-import { db, queryClient } from '../src/db/client.ts';
+import { db } from '../src/db/client.ts';
 import { env } from '../src/env.ts';
 import { createApp } from '../src/index.ts';
 import { BAS_CHART } from '../src/lib/accounts.ts';
@@ -34,13 +34,15 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Only end this file's local `sql` — the shared queryClient from src/db/client.ts
+  // is closed automatically on process exit. Closing it here would break sibling
+  // test files that import the same singleton.
   await sql.end();
-  await queryClient.end();
 });
 
 beforeEach(async () => {
-  // Only truncate transactional tables — keep the seeded chart of accounts.
-  await sql`TRUNCATE TABLE postings, journal_entries, bills RESTART IDENTITY CASCADE`;
+  // Truncate transactional tables — keep the seeded chart of accounts.
+  await sql`TRUNCATE TABLE postings, journal_entries, bills, bill_drafts, suppliers RESTART IDENTITY CASCADE`;
 });
 
 function stub(proposal = balancedProposal): JournalGenerator {
