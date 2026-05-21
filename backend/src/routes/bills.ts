@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import type { DB } from '../db/client.ts';
 import { bills, journalEntries, postings } from '../db/schema.ts';
+import { loadChart } from '../lib/accounts.ts';
 import type { JournalGenerator, JournalProposal } from '../lib/anthropic.ts';
 import { JournalValidationError, assertAccountsValid, assertBalanced } from '../lib/journal.ts';
 import { readStoredFile, storePdf } from '../lib/storage.ts';
@@ -61,10 +62,14 @@ export function createBillsRoute(deps: BillsRouteDeps): Hono {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const stored = await storePdf({ bytes, originalName: file.name });
 
+    // Load the live chart from DB once per request — used both for the LLM
+    // prompt and for post-generation validation.
+    const chart = await loadChart(db);
+
     // Single LLM call — generate + parse + zod-validate.
     let proposal: JournalProposal;
     try {
-      proposal = await generateJournal({ pdf: bytes, filename: file.name });
+      proposal = await generateJournal({ pdf: bytes, filename: file.name, chart });
     } catch (err) {
       throw new HTTPException(502, {
         message: `Journal generation failed: ${(err as Error).message}`,
@@ -75,7 +80,7 @@ export function createBillsRoute(deps: BillsRouteDeps): Hono {
     // and validation_errors set) so the UI can surface the issue and the user can reject.
     const validationIssues: string[] = [];
     try {
-      assertAccountsValid(proposal.postings);
+      assertAccountsValid(proposal.postings, chart);
     } catch (err) {
       if (err instanceof JournalValidationError) validationIssues.push(...err.issues);
       else throw err;

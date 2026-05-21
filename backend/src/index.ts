@@ -4,7 +4,7 @@ import { logger } from 'hono/logger';
 import { db } from './db/client.ts';
 import { env } from './env.ts';
 import { type JournalGenerator, createAnthropicJournalGenerator } from './lib/anthropic.ts';
-import { accountsRoute } from './routes/accounts.ts';
+import { createAccountsRoute } from './routes/accounts.ts';
 import { type BillsRouteDeps, createBillsRoute } from './routes/bills.ts';
 
 export function createApp(deps?: Partial<BillsRouteDeps>): Hono {
@@ -26,8 +26,9 @@ export function createApp(deps?: Partial<BillsRouteDeps>): Hono {
 
   app.get('/health', (c) => c.json({ ok: true }));
 
-  app.route('/api/accounts', accountsRoute);
-  app.route('/api/bills', createBillsRoute({ db: deps?.db ?? db, generateJournal }));
+  const dbInstance = deps?.db ?? db;
+  app.route('/api/accounts', createAccountsRoute(dbInstance));
+  app.route('/api/bills', createBillsRoute({ db: dbInstance, generateJournal }));
 
   return app;
 }

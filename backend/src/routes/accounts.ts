@@ -1,6 +1,9 @@
 import { Hono } from 'hono';
-import { BAS_CHART } from '../lib/accounts.ts';
+import type { DB } from '../db/client.ts';
+import { loadChart } from '../lib/accounts.ts';
 
-export const accountsRoute = new Hono();
-
-accountsRoute.get('/', (c) => c.json({ accounts: BAS_CHART }));
+export function createAccountsRoute(db: DB): Hono {
+  const route = new Hono();
+  route.get('/', async (c) => c.json({ accounts: await loadChart(db) }));
+  return route;
+}

@@ -12,7 +12,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Tool } from '@anthropic-ai/sdk/resources/messages';
 import { z } from 'zod';
-import { BAS_CHART } from './accounts.ts';
+import type { Account } from './accounts.ts';
 
 const proposalPostingSchema = z.object({
   accountNumber: z.string(),
@@ -40,11 +40,13 @@ export type JournalProposal = z.infer<typeof proposalSchema>;
 export type JournalGenerator = (input: {
   pdf: Uint8Array;
   filename: string;
+  chart: ReadonlyArray<Account>;
 }) => Promise<JournalProposal>;
 
 const TOOL_NAME = 'record_journal_entry';
 
-const SYSTEM_PROMPT = `You are an expert Swedish bookkeeper. Given a supplier invoice (PDF) and the BAS chart of accounts listed below, produce a balanced double-entry journal entry by calling the \`${TOOL_NAME}\` tool.
+function buildSystemPrompt(chart: ReadonlyArray<Account>): string {
+  return `You are an expert Swedish bookkeeper. Given a supplier invoice (PDF) and the BAS chart of accounts listed below, produce a balanced double-entry journal entry by calling the \`${TOOL_NAME}\` tool.
 
 # Rules
 
@@ -61,8 +63,9 @@ const SYSTEM_PROMPT = `You are an expert Swedish bookkeeper. Given a supplier in
 
 # BAS chart of accounts
 
-${BAS_CHART.map((a) => `- ${a.number} ${a.name}`).join('\n')}
+${chart.map((a) => `- ${a.number} ${a.name}`).join('\n')}
 `;
+}
 
 const USER_PROMPT_TEXT =
   'Generate a balanced double-entry journal entry for this invoice using the provided BAS chart of accounts. Call the record_journal_entry tool exactly once.';
@@ -122,13 +125,13 @@ export function createAnthropicJournalGenerator(
 ): JournalGenerator {
   const client = new Anthropic({ apiKey: opts.apiKey });
 
-  return async ({ pdf }) => {
+  return async ({ pdf, chart }) => {
     const base64 = Buffer.from(pdf).toString('base64');
 
     const response = await client.messages.create({
       model: opts.model,
       max_tokens: 4096,
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(chart),
       tools: [
         {
           name: TOOL_NAME,

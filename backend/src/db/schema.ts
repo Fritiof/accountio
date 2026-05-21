@@ -13,6 +13,12 @@ import {
 
 export const journalStatusEnum = pgEnum('journal_status', ['pending', 'approved', 'rejected']);
 
+export const accounts = pgTable('accounts', {
+  number: text('number').primaryKey(),
+  name: text('name').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const bills = pgTable('bills', {
   id: uuid('id').primaryKey().defaultRandom(),
   originalName: text('original_name').notNull(),
@@ -66,6 +72,8 @@ export const postings = pgTable('postings', {
   sortOrder: integer('sort_order').notNull().default(0),
 });
 
+export type Account = typeof accounts.$inferSelect;
+export type NewAccount = typeof accounts.$inferInsert;
 export type Bill = typeof bills.$inferSelect;
 export type NewBill = typeof bills.$inferInsert;
 export type JournalEntry = typeof journalEntries.$inferSelect;

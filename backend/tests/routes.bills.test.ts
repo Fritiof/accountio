@@ -11,6 +11,7 @@ import postgres from 'postgres';
 import { db, queryClient } from '../src/db/client.ts';
 import { env } from '../src/env.ts';
 import { createApp } from '../src/index.ts';
+import { BAS_CHART } from '../src/lib/accounts.ts';
 import type { JournalGenerator } from '../src/lib/anthropic.ts';
 import {
   balancedProposal,
@@ -24,6 +25,12 @@ const SAMPLE_PDF_PATH = join(import.meta.dir, '..', '..', 'simple_invoice.pdf');
 
 beforeAll(async () => {
   await migrate(db, { migrationsFolder: './src/db/migrations' });
+  // Migration includes seed INSERTs, but in case the table existed beforehand
+  // (e.g. partial run), upsert the chart so tests have a stable baseline.
+  for (const a of BAS_CHART) {
+    await sql`INSERT INTO accounts (number, name) VALUES (${a.number}, ${a.name})
+              ON CONFLICT (number) DO NOTHING`;
+  }
 });
 
 afterAll(async () => {
@@ -32,6 +39,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  // Only truncate transactional tables — keep the seeded chart of accounts.
   await sql`TRUNCATE TABLE postings, journal_entries, bills RESTART IDENTITY CASCADE`;
 });
 

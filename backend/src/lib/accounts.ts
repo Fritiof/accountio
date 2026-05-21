@@ -1,11 +1,18 @@
 /**
- * BAS chart of accounts (Swedish kontoplan), subset provided in the interview spec.
- * Hardcoded — it's 20 rows and never changes for this assignment.
+ * Chart of accounts (Swedish BAS kontoplan), subset provided in the interview spec.
+ *
+ * The canonical source of truth is the `accounts` table — see the seed migration
+ * at src/db/migrations/0001_productive_thunderbolt_ross.sql. The constant below
+ * is kept as a parallel definition: it's used by pure tests that don't want a DB,
+ * and as a documentation anchor for which accounts the seed migration installs.
  *
  * Special accounts used by the LLM prompt:
  * - 2440 Leverantörsskulder — credited at gross for supplier payables
  * - 2640 Ingående moms — debited at the VAT (moms) amount on supplier invoices
  */
+import type { DB } from '../db/client.ts';
+import { accounts } from '../db/schema.ts';
+
 export type Account = {
   number: string;
   name: string;
@@ -36,10 +43,20 @@ export const BAS_CHART: readonly Account[] = [
 
 const BY_NUMBER = new Map<string, Account>(BAS_CHART.map((a) => [a.number, a]));
 
-export function findAccount(number: string): Account | undefined {
-  return BY_NUMBER.get(number);
-}
-
+/**
+ * Sync membership check against the BAS_CHART constant. Used by validators when
+ * no explicit chart is passed (i.e. pure tests). Production routes always load
+ * the live chart from the DB and pass it explicitly to assertAccountsValid.
+ */
 export function isValidAccount(number: string): boolean {
   return BY_NUMBER.has(number);
+}
+
+/** Read the live chart from the database. */
+export async function loadChart(db: DB): Promise<Account[]> {
+  const rows = await db
+    .select({ number: accounts.number, name: accounts.name })
+    .from(accounts)
+    .orderBy(accounts.number);
+  return rows;
 }
