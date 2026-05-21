@@ -112,6 +112,26 @@ Three tables (full schema in [`backend/src/db/schema.ts`](backend/src/db/schema.
 
 Cascade deletes from bill → entry → postings.
 
+## File storage
+
+Uploaded PDFs are written to a local filesystem directory pointed to by `UPLOAD_DIR` — not stored as bytes in Postgres. Each upload gets a fresh UUID filename (e.g. `f8723a0a-81eb-4c43-89c0-9cd68e0ec515.pdf`); the DB row stores only the relative path in `bills.storage_path`.
+
+- **Docker**: `UPLOAD_DIR=/app/uploads` inside the backend container, backed by the named docker volume `uploads`. Survives `docker compose down`, gone on `down -v`.
+- **Local**: `UPLOAD_DIR=./uploads` relative to `backend/`. A plain directory.
+
+The only code that knows about the disk is [`backend/src/lib/storage.ts`](backend/src/lib/storage.ts) — about 30 lines. It exports `storePdf({ bytes, originalName })` and `readStoredFile(storagePath)`. The bills route writes via the first and the PDF stream route reads via the second.
+
+### What scaling to multiple API instances would need
+
+The current shape is single-node by design — a second backend replica wouldn't see PDFs uploaded against the first. To scale horizontally:
+
+1. **Swap `storage.ts` for object storage** (S3, R2, GCS). `storePdf` does `PutObject`; `readStoredFile` either streams via `GetObject` or returns a pre-signed URL. `bills.storage_path` becomes the object key. Everything else (routes, schema, frontend) stays unchanged — the seam is tight on purpose.
+2. **Optional: direct browser → object store uploads** via pre-signed PUT URLs. Removes the 2 MB round-trip through the backend; the backend only sees the resulting object key + metadata. Better latency at the cost of a small flow change in `UploadButton`.
+3. **Database is already horizontally-safe** — Postgres connection pooling via postgres.js is fine for many backend replicas, and the upload path is wrapped in a transaction.
+4. **The LLM call is the long pole** — at ~5–15 s/upload, you'd want to push generation to a queue (BullMQ on Redis, or pg-boss for a one-service-fewer option) and return `202 Accepted` with the bill id; the frontend polls or subscribes to a server-sent event for completion. Same code surface, just async around the boundary.
+
+Order of operations if scaling actually came up: queue the generator first (biggest win, removes a 15-second-blocked request), then move PDFs to object storage (unblocks horizontal scale), then split read replicas if Postgres becomes the bottleneck.
+
 ## Accounting model
 
 For every supplier invoice with Swedish VAT (moms):
@@ -258,7 +278,8 @@ See [CLAUDE.md](CLAUDE.md) — the rules for any human or AI agent contributing 
 
 ## Known limitations / what I'd ship next
 
-- Single LLM call on the upload request blocks for ~5-15 s. A real product would queue this and stream results, but for the interview scope synchronous is fine.
+- Single LLM call on the upload request blocks for ~5-15 s. A real product would queue this and stream results, but for the interview scope synchronous is fine. See [File storage › scaling to multiple API instances](#what-scaling-to-multiple-api-instances-would-need) for the migration path.
+- PDFs live on a local volume tied to one backend instance — horizontally scaling the API requires moving to object storage. Same section above covers the swap.
 - No authentication — anyone hitting `localhost` can upload and approve.
 - No multi-tenant data isolation.
 - Currency is whatever Claude reports from the PDF; no FX conversion if the bill is in EUR/USD.
