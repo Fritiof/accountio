@@ -9,6 +9,7 @@ import type { JournalProposal } from '../../src/lib/anthropic.ts';
 
 const HEADER = {
   supplierName: 'Acme Consulting AB',
+  supplierVatNumber: 'SE556677889901',
   invoiceNumber: 'INV-2025-0042',
   invoiceDate: '2025-05-01',
   dueDate: '2025-05-31',

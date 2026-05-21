@@ -1,0 +1,1 @@
+ALTER TABLE "bills" ADD COLUMN "supplier_vat_number" text;

@@ -16,6 +16,7 @@ export type Bill = {
   mimeType: string;
   sizeBytes: number;
   supplierName: string | null;
+  supplierVatNumber: string | null;
   invoiceNumber: string | null;
   invoiceDate: string | null;
   dueDate: string | null;

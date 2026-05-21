@@ -73,12 +73,18 @@ describe('POST /api/bills', () => {
     expect(res.status).toBe(201);
 
     const body = (await res.json()) as {
-      bill: { id: string; supplierName: string; grossAmount: string };
+      bill: {
+        id: string;
+        supplierName: string;
+        supplierVatNumber: string;
+        grossAmount: string;
+      };
       journalEntry: { id: string; status: string; validationErrors: string | null };
       postings: { accountNumber: string; debit: string; credit: string }[];
     };
 
     expect(body.bill.supplierName).toBe('Acme Consulting AB');
+    expect(body.bill.supplierVatNumber).toBe('SE556677889901');
     expect(body.bill.grossAmount).toBe('12500.00');
     expect(body.journalEntry.status).toBe('pending');
     expect(body.journalEntry.validationErrors).toBeNull();

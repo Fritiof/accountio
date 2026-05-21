@@ -15,6 +15,13 @@
       "when": 1779337480057,
       "tag": "0001_productive_thunderbolt_ross",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1779338594952,
+      "tag": "0002_narrow_loa",
+      "breakpoints": true
     }
   ]
 }

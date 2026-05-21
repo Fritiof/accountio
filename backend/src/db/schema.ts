@@ -27,6 +27,7 @@ export const bills = pgTable('bills', {
   sizeBytes: integer('size_bytes').notNull(),
 
   supplierName: text('supplier_name'),
+  supplierVatNumber: text('supplier_vat_number'),
   invoiceNumber: text('invoice_number'),
   invoiceDate: date('invoice_date'),
   dueDate: date('due_date'),

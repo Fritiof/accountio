@@ -24,6 +24,7 @@ const proposalPostingSchema = z.object({
 
 const proposalSchema = z.object({
   supplierName: z.string().nullable(),
+  supplierVatNumber: z.string().nullable(),
   invoiceNumber: z.string().nullable(),
   invoiceDate: z.string().nullable(),
   dueDate: z.string().nullable(),
@@ -59,6 +60,7 @@ function buildSystemPrompt(chart: ReadonlyArray<Account>): string {
 - All amounts must be in the invoice's currency (do not convert).
 - Each posting must have a non-empty \`description\`. Set the side that doesn't apply to "0".
 - Dates must be ISO format YYYY-MM-DD.
+- Capture the supplier's tax identifier as \`supplierVatNumber\` — typically a Swedish VAT number ("SE" + 12 digits, e.g. \`SE556677889901\`) or an organisationsnummer ("556677-8899"). Use whatever form is printed on the invoice; null if not present.
 - Provide a one-paragraph \`reasoning\` explaining the account choices.
 
 # BAS chart of accounts
@@ -74,6 +76,7 @@ const TOOL_INPUT_SCHEMA: Tool.InputSchema = {
   type: 'object',
   required: [
     'supplierName',
+    'supplierVatNumber',
     'invoiceNumber',
     'invoiceDate',
     'dueDate',
@@ -86,6 +89,10 @@ const TOOL_INPUT_SCHEMA: Tool.InputSchema = {
   ],
   properties: {
     supplierName: { type: ['string', 'null'] },
+    supplierVatNumber: {
+      type: ['string', 'null'],
+      description: 'Supplier VAT or organisationsnummer as printed on the invoice.',
+    },
     invoiceNumber: { type: ['string', 'null'] },
     invoiceDate: { type: ['string', 'null'], description: 'ISO YYYY-MM-DD or null.' },
     dueDate: { type: ['string', 'null'], description: 'ISO YYYY-MM-DD or null.' },
