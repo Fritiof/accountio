@@ -1,15 +1,15 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
-import { db } from '../src/db/client.ts';
-import { suppliers } from '../src/db/schema.ts';
-import { env } from '../src/env.ts';
+import { db } from '../db/client.ts';
+import { suppliers } from '../db/schema.ts';
+import { env } from '../env.ts';
 import {
   findSupplierMatch,
   normalizeName,
   normalizeOrgNumber,
   normalizeVatNumber,
-} from '../src/lib/suppliers.ts';
+} from './suppliers.ts';
 
 describe('normalize helpers (pure)', () => {
   test('normalizeOrgNumber trims and rejects empties', () => {

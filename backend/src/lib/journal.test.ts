@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { BAS_CHART } from '../src/lib/accounts.ts';
+import { BAS_CHART } from './accounts.ts';
 import {
   JournalValidationError,
   assertAccountsValid,
   assertBalanced,
   formatCents,
   toCents,
-} from '../src/lib/journal.ts';
+} from './journal.ts';
 
 describe('toCents', () => {
   test('parses decimal strings to integer cents', () => {

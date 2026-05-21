@@ -138,7 +138,12 @@ The matching module is the single seam for upgrading to fuzzy matching later (e.
 
 ## Tests
 
-- Four files in `backend/tests/`: `journal.test.ts` (pure validators), `suppliers.test.ts` (mostly pure + DB integration), `routes.bills.test.ts` (HTTP via `app.request()`), `routes.suppliers.test.ts`.
+- Tests live **next to the source files they cover** — `foo.ts` and `foo.test.ts` in the same directory. Bun's test runner discovers `*.test.ts` recursively. Four test files today:
+  - `src/lib/journal.test.ts` (pure validators)
+  - `src/lib/suppliers.test.ts` (mostly pure + DB integration)
+  - `src/routes/bills.test.ts` (HTTP via `app.request()`)
+  - `src/routes/suppliers.test.ts`
+- The `tests/` directory holds shared infra only: `setup.ts` (preloaded via `bunfig.toml`'s `[test].preload`) and `fixtures/proposal.ts` (canned Claude responses for stubbing). New tests go next to source, not into `tests/`.
 - Setup runs via `bunfig.toml`'s `[test].preload = ["./tests/setup.ts"]` — sets safe env defaults before any `src/` import triggers env validation.
 - Route tests share the singleton `queryClient` from `src/db/client.ts`. Each file ends only its own local `sql` in `afterAll` — never end `queryClient` from a test file or you'll break sibling files.
 - `beforeEach` truncates transactional tables (`postings, journal_entries, bills, bill_drafts, suppliers`) but **keeps the seeded `accounts`** so the BAS chart is always available.

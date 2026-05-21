@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
-import { db } from '../src/db/client.ts';
-import { suppliers } from '../src/db/schema.ts';
-import { env } from '../src/env.ts';
-import { createApp } from '../src/index.ts';
-import { balancedProposal } from './fixtures/proposal.ts';
+import { balancedProposal } from '../../tests/fixtures/proposal.ts';
+import { db } from '../db/client.ts';
+import { suppliers } from '../db/schema.ts';
+import { env } from '../env.ts';
+import { createApp } from '../index.ts';
 
 const sql = postgres(env.DATABASE_URL, { max: 1 });
 

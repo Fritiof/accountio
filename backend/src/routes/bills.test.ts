@@ -9,30 +9,38 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
-import { db } from '../src/db/client.ts';
-import { suppliers } from '../src/db/schema.ts';
-import { env } from '../src/env.ts';
-import { createApp } from '../src/index.ts';
-import { BAS_CHART } from '../src/lib/accounts.ts';
-import type { JournalGenerator, JournalProposal } from '../src/lib/anthropic.ts';
 import {
   balancedProposal,
   unbalancedProposal,
   unknownAccountProposal,
-} from './fixtures/proposal.ts';
+} from '../../tests/fixtures/proposal.ts';
+import { db } from '../db/client.ts';
+import { suppliers } from '../db/schema.ts';
+import { env } from '../env.ts';
+import { createApp } from '../index.ts';
+import { BAS_CHART } from '../lib/accounts.ts';
+import type { JournalGenerator, JournalProposal } from '../lib/anthropic.ts';
 
 const sql = postgres(env.DATABASE_URL, { max: 1 });
 
-// sample_invoices/ lives at the repo root locally, but is mounted at
-// /app/sample_invoices when running inside the backend docker container.
+// sample_invoices/ lives at the repo root locally (../../../sample_invoices from
+// here), but is mounted at /app/sample_invoices in the backend docker container
+// (../../sample_invoices). Try the native path first, fall back to the docker path.
 const SAMPLE_PDF_NATIVE = join(
+  import.meta.dir,
+  '..',
+  '..',
+  '..',
+  'sample_invoices',
+  'simple_invoice.pdf',
+);
+const SAMPLE_PDF_DOCKER = join(
   import.meta.dir,
   '..',
   '..',
   'sample_invoices',
   'simple_invoice.pdf',
 );
-const SAMPLE_PDF_DOCKER = join(import.meta.dir, '..', 'sample_invoices', 'simple_invoice.pdf');
 const SAMPLE_PDF_PATH = existsSync(SAMPLE_PDF_NATIVE) ? SAMPLE_PDF_NATIVE : SAMPLE_PDF_DOCKER;
 
 beforeAll(async () => {

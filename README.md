@@ -240,12 +240,14 @@ cd backend
 bun test
 ```
 
-61 tests, ~700 ms across four files:
+63 tests, ~900 ms. **Tests live next to the source they cover** (`foo.ts` and `foo.test.ts` in the same directory) — easier to find, harder to forget when you change the source. Four files today:
 
-- **`journal.test.ts`** (21 tests, pure) — toCents parsing, format round-trips, balance assertion, float-drift trap, negative debit rejection, BAS-chart membership, multi-issue aggregation.
-- **`suppliers.test.ts`** (13 tests, mostly pure) — normalize helpers, org wins over VAT, VAT falls back to name, candidates path for multiple exact-name matches and for partial-name, empty input → none.
-- **`routes.bills.test.ts`** (22 tests, HTTP-level against real Postgres) — prepare happy path with match=none vs match=exact-by-org, 400/415/502, confirm with existing supplier vs create-new, validation-error paths, 404 on unknown draft, draft delete + draft PDF stream, list/detail/approve/reject for confirmed bills.
-- **`routes.suppliers.test.ts`** (5 tests) — list empty, list all, ILIKE search, detail with bill count, 404.
+- **`src/lib/journal.test.ts`** (22 tests, pure) — toCents parsing, format round-trips, balance assertion, float-drift trap, negative debit rejection (incl. the "negatives cancel out" regression), BAS-chart membership, multi-issue aggregation.
+- **`src/lib/suppliers.test.ts`** (13 tests, mostly pure) — normalize helpers, org wins over VAT, VAT falls back to name, candidates path for multiple exact-name matches and for partial-name, empty input → none.
+- **`src/routes/bills.test.ts`** (23 tests, HTTP-level against real Postgres) — prepare happy path with match=none vs match=exact-by-org, 400/415/502, confirm with existing supplier vs create-new (and the concurrent-confirm race regression), validation-error paths, 404 on unknown draft, draft delete + draft PDF stream, list/detail/approve/reject for confirmed bills.
+- **`src/routes/suppliers.test.ts`** (5 tests) — list empty, list all, ILIKE search, detail with bill count, 404.
+
+The `tests/` directory holds only shared infra: `setup.ts` (preloaded via `bunfig.toml`) and `fixtures/proposal.ts` (canned Claude responses).
 
 The Anthropic client is stubbed via the DI seam — tests don't touch the real API.
 
@@ -264,21 +266,21 @@ backend/
 │   │   └── migrations/          # drizzle-kit generated (+ chart seed)
 │   ├── lib/
 │   │   ├── accounts.ts          # BAS chart constant + loadChart(db)
-│   │   ├── suppliers.ts         # normalize helpers + findSupplierMatch
-│   │   ├── journal.ts           # balance + chart validators (pure)
 │   │   ├── anthropic.ts         # createAnthropicJournalGenerator + DI seam
-│   │   └── storage.ts           # PDF filesystem storage
+│   │   ├── journal.ts           # balance + chart validators (pure)
+│   │   ├── journal.test.ts      #   ← co-located test
+│   │   ├── storage.ts           # PDF filesystem storage
+│   │   ├── suppliers.ts         # normalize helpers + findSupplierMatch
+│   │   └── suppliers.test.ts    #   ← co-located test
 │   └── routes/
 │       ├── accounts.ts
+│       ├── bills.ts             # prepare, confirm, draft mgmt, CRUD, approve/reject
+│       ├── bills.test.ts        #   ← co-located HTTP test
 │       ├── suppliers.ts         # list + detail (read-only)
-│       └── bills.ts             # prepare, confirm, draft mgmt, CRUD, approve/reject
-├── tests/
-│   ├── journal.test.ts          # pure validator tests
-│   ├── suppliers.test.ts        # matching + normalize tests
-│   ├── routes.bills.test.ts     # HTTP route tests
-│   ├── routes.suppliers.test.ts # supplier endpoints
-│   ├── fixtures/proposal.ts     # canned Claude proposals for stubbing
-│   └── setup.ts                 # preloaded via bunfig.toml
+│       └── suppliers.test.ts    #   ← co-located endpoint test
+├── tests/                       # shared test infra only
+│   ├── setup.ts                 # preloaded via bunfig.toml (env defaults)
+│   └── fixtures/proposal.ts     # canned Claude proposals for stubbing
 ├── bunfig.toml
 ├── drizzle.config.ts
 ├── tsconfig.json
