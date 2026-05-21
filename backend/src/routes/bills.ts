@@ -1,33 +1,71 @@
 /**
- * Bills routes. Accepts a DB and JournalGenerator via the factory so tests
- * can inject a stub generator (no module-level mocking of Anthropic).
+ * Bills routes. Two-stage upload:
+ *
+ *   POST   /api/bills/prepare        — multipart upload, runs Claude, finds a supplier match, returns a draftId
+ *   POST   /api/bills/confirm        — user picks supplier; bill + entry + postings persisted; draft deleted
+ *   DELETE /api/bills/drafts/:id     — abandon a draft (deletes PDF + row)
+ *   GET    /api/bills/drafts/:id/pdf — preview PDF for the confirm page
+ *
+ *   GET    /api/bills                — list confirmed bills
+ *   GET    /api/bills/:id            — full detail (bill + entry + postings)
+ *   GET    /api/bills/:id/pdf        — stream PDF
+ *   POST   /api/bills/:id/approve    — flip status (idempotent)
+ *   POST   /api/bills/:id/reject     — flip status (idempotent)
+ *
+ * The route factory accepts a DB + JournalGenerator so tests can stub the
+ * Anthropic call without mocking modules.
  */
-import { desc, eq } from 'drizzle-orm';
+import { unlink } from 'node:fs/promises';
+import { desc, eq, lt } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { z } from 'zod';
 import type { DB } from '../db/client.ts';
-import { bills, journalEntries, postings } from '../db/schema.ts';
+import { billDrafts, bills, journalEntries, postings, suppliers } from '../db/schema.ts';
 import { loadChart } from '../lib/accounts.ts';
 import type { JournalGenerator, JournalProposal } from '../lib/anthropic.ts';
 import { JournalValidationError, assertAccountsValid, assertBalanced } from '../lib/journal.ts';
-import { readStoredFile, storePdf } from '../lib/storage.ts';
+import { resolveStoragePath, storePdf } from '../lib/storage.ts';
+import {
+  findSupplierMatch,
+  normalizeName,
+  normalizeOrgNumber,
+  normalizeVatNumber,
+} from '../lib/suppliers.ts';
 
 export type BillsRouteDeps = {
   db: DB;
   generateJournal: JournalGenerator;
 };
 
+const DRAFT_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+const confirmBodySchema = z.object({
+  draftId: z.string().uuid(),
+  supplier: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('existing'), id: z.string().uuid() }),
+    z.object({
+      kind: z.literal('create'),
+      name: z.string().min(1),
+      orgNumber: z.string().nullable().optional(),
+      vatNumber: z.string().nullable().optional(),
+    }),
+  ]),
+});
+
 export function createBillsRoute(deps: BillsRouteDeps): Hono {
   const route = new Hono();
   const { db, generateJournal } = deps;
 
-  // GET /api/bills — list newest first, joined with journal status.
+  // ----- LIST + DETAIL -----------------------------------------------------
+
   route.get('/', async (c) => {
     const rows = await db
       .select({
         id: bills.id,
         originalName: bills.originalName,
         supplierName: bills.supplierName,
+        supplierId: bills.supplierId,
         invoiceNumber: bills.invoiceNumber,
         invoiceDate: bills.invoiceDate,
         grossAmount: bills.grossAmount,
@@ -41,8 +79,48 @@ export function createBillsRoute(deps: BillsRouteDeps): Hono {
     return c.json({ bills: rows });
   });
 
-  // POST /api/bills — multipart upload, store, generate, validate, persist.
-  route.post('/', async (c) => {
+  route.get('/:id', async (c) => {
+    const detail = await loadDetail(db, c.req.param('id'));
+    if (!detail) throw new HTTPException(404, { message: 'Bill not found.' });
+    return c.json(detail);
+  });
+
+  route.get('/:id/pdf', async (c) => {
+    const id = c.req.param('id');
+    const [row] = await db.select().from(bills).where(eq(bills.id, id)).limit(1);
+    if (!row) throw new HTTPException(404, { message: 'Bill not found.' });
+    return streamPdf(row.storagePath, row.mimeType, row.originalName);
+  });
+
+  // ----- APPROVE / REJECT --------------------------------------------------
+
+  const decide = async (id: string, status: 'approved' | 'rejected') => {
+    const [entry] = await db
+      .select()
+      .from(journalEntries)
+      .where(eq(journalEntries.billId, id))
+      .limit(1);
+    if (!entry) throw new HTTPException(404, { message: 'Bill not found.' });
+    if (entry.status !== status) {
+      await db
+        .update(journalEntries)
+        .set({ status, decidedAt: new Date() })
+        .where(eq(journalEntries.id, entry.id));
+    }
+    const detail = await loadDetail(db, id);
+    if (!detail) throw new HTTPException(404, { message: 'Bill not found.' });
+    return detail;
+  };
+
+  route.post('/:id/approve', async (c) => c.json(await decide(c.req.param('id'), 'approved')));
+  route.post('/:id/reject', async (c) => c.json(await decide(c.req.param('id'), 'rejected')));
+
+  // ----- PREPARE (stage 1) -------------------------------------------------
+
+  route.post('/prepare', async (c) => {
+    // Sweep expired drafts before doing anything else.
+    await sweepExpiredDrafts(db);
+
     let form: FormData;
     try {
       form = await c.req.formData();
@@ -62,23 +140,79 @@ export function createBillsRoute(deps: BillsRouteDeps): Hono {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const stored = await storePdf({ bytes, originalName: file.name });
 
-    // Load the live chart from DB once per request — used both for the LLM
-    // prompt and for post-generation validation.
     const chart = await loadChart(db);
 
-    // Single LLM call — generate + parse + zod-validate.
     let proposal: JournalProposal;
     try {
       proposal = await generateJournal({ pdf: bytes, filename: file.name, chart });
     } catch (err) {
+      // Clean up the orphaned PDF we just wrote — there's no draft row pointing at it.
+      await unlink(resolveStoragePath(stored.storagePath)).catch(() => {});
       throw new HTTPException(502, {
         message: `Journal generation failed: ${(err as Error).message}`,
       });
     }
 
-    // Accounting invariants. If they fail, we still persist (with status='pending'
-    // and validation_errors set) so the UI can surface the issue and the user can reject.
+    const match = await findSupplierMatch(db, {
+      orgNumber: proposal.supplierOrgNumber,
+      vatNumber: proposal.supplierVatNumber,
+      name: proposal.supplierName,
+    });
+
+    const [draft] = await db
+      .insert(billDrafts)
+      .values({
+        storagePath: stored.storagePath,
+        originalName: file.name,
+        mimeType: 'application/pdf',
+        sizeBytes: stored.sizeBytes,
+        proposalJson: proposal,
+        matchSupplierId: match.kind === 'exact' ? match.supplier.id : null,
+        matchMethod: match.kind === 'exact' ? match.matchedBy : null,
+        expiresAt: new Date(Date.now() + DRAFT_TTL_MS),
+      })
+      .returning();
+    if (!draft) throw new Error('Failed to insert draft');
+
+    return c.json(
+      {
+        draftId: draft.id,
+        proposal,
+        match,
+      },
+      201,
+    );
+  });
+
+  // ----- CONFIRM (stage 2) -------------------------------------------------
+
+  route.post('/confirm', async (c) => {
+    const parsed = confirmBodySchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: `Invalid body: ${parsed.error.message}` });
+    }
+    const body = parsed.data;
+
+    const [draft] = await db
+      .select()
+      .from(billDrafts)
+      .where(eq(billDrafts.id, body.draftId))
+      .limit(1);
+    if (!draft) throw new HTTPException(404, { message: 'Draft not found.' });
+    if (draft.expiresAt.getTime() < Date.now()) {
+      // Clean up and tell the caller to re-upload.
+      await deleteDraftAndPdf(db, draft.id, draft.storagePath);
+      throw new HTTPException(410, { message: 'Draft has expired; re-upload required.' });
+    }
+
+    const proposal = draft.proposalJson as JournalProposal;
+
+    // Resolve or create the supplier.
+    const supplierId = await resolveSupplier(db, body.supplier);
+
+    // Re-run validators authoritatively at confirm time.
     const validationIssues: string[] = [];
+    const chart = await loadChart(db);
     try {
       assertAccountsValid(proposal.postings, chart);
     } catch (err) {
@@ -96,10 +230,11 @@ export function createBillsRoute(deps: BillsRouteDeps): Hono {
       const [insertedBill] = await tx
         .insert(bills)
         .values({
-          originalName: file.name,
-          storagePath: stored.storagePath,
-          mimeType: 'application/pdf',
-          sizeBytes: stored.sizeBytes,
+          originalName: draft.originalName,
+          storagePath: draft.storagePath,
+          mimeType: draft.mimeType,
+          sizeBytes: draft.sizeBytes,
+          supplierId,
           supplierName: proposal.supplierName,
           supplierOrgNumber: proposal.supplierOrgNumber,
           supplierVatNumber: proposal.supplierVatNumber,
@@ -142,62 +277,48 @@ export function createBillsRoute(deps: BillsRouteDeps): Hono {
         )
         .returning();
 
+      // PDF stays at the same storage_path; only delete the draft row.
+      await tx.delete(billDrafts).where(eq(billDrafts.id, draft.id));
+
       return { bill: insertedBill, journalEntry: insertedEntry, postings: postingRows };
     });
 
     return c.json(detail, 201);
   });
 
-  // GET /api/bills/:id — full detail.
-  route.get('/:id', async (c) => {
+  // ----- DRAFT MANAGEMENT --------------------------------------------------
+
+  route.delete('/drafts/:id', async (c) => {
     const id = c.req.param('id');
-    const detail = await loadDetail(db, id);
-    if (!detail) throw new HTTPException(404, { message: 'Bill not found.' });
-    return c.json(detail);
+    const [draft] = await db.select().from(billDrafts).where(eq(billDrafts.id, id)).limit(1);
+    if (!draft) throw new HTTPException(404, { message: 'Draft not found.' });
+    await deleteDraftAndPdf(db, id, draft.storagePath);
+    return c.body(null, 204);
   });
 
-  // GET /api/bills/:id/pdf — stream the stored PDF.
-  route.get('/:id/pdf', async (c) => {
+  route.get('/drafts/:id/pdf', async (c) => {
     const id = c.req.param('id');
-    const [row] = await db.select().from(bills).where(eq(bills.id, id)).limit(1);
-    if (!row) throw new HTTPException(404, { message: 'Bill not found.' });
-    const file = readStoredFile(row.storagePath);
-    if (!(await file.exists())) {
-      throw new HTTPException(410, { message: 'PDF no longer available.' });
-    }
-    return new Response(file.stream(), {
-      headers: {
-        'Content-Type': row.mimeType,
-        'Content-Disposition': `inline; filename="${encodeURIComponent(row.originalName)}"`,
-      },
-    });
+    const [draft] = await db.select().from(billDrafts).where(eq(billDrafts.id, id)).limit(1);
+    if (!draft) throw new HTTPException(404, { message: 'Draft not found.' });
+    return streamPdf(draft.storagePath, draft.mimeType, draft.originalName);
   });
-
-  // POST /api/bills/:id/approve and /reject — idempotent.
-  const decide = async (id: string, status: 'approved' | 'rejected') => {
-    const [entry] = await db
-      .select()
-      .from(journalEntries)
-      .where(eq(journalEntries.billId, id))
-      .limit(1);
-    if (!entry) throw new HTTPException(404, { message: 'Bill not found.' });
-
-    if (entry.status !== status) {
-      await db
-        .update(journalEntries)
-        .set({ status, decidedAt: new Date() })
-        .where(eq(journalEntries.id, entry.id));
-    }
-
-    const detail = await loadDetail(db, id);
-    if (!detail) throw new HTTPException(404, { message: 'Bill not found.' });
-    return detail;
-  };
-
-  route.post('/:id/approve', async (c) => c.json(await decide(c.req.param('id'), 'approved')));
-  route.post('/:id/reject', async (c) => c.json(await decide(c.req.param('id'), 'rejected')));
 
   return route;
+}
+
+// ----- helpers ------------------------------------------------------------
+
+async function streamPdf(storagePath: string, mimeType: string, originalName: string) {
+  const file = Bun.file(resolveStoragePath(storagePath));
+  if (!(await file.exists())) {
+    throw new HTTPException(410, { message: 'PDF no longer available.' });
+  }
+  return new Response(file.stream(), {
+    headers: {
+      'Content-Type': mimeType,
+      'Content-Disposition': `inline; filename="${encodeURIComponent(originalName)}"`,
+    },
+  });
 }
 
 async function loadDetail(db: DB, billId: string) {
@@ -215,4 +336,55 @@ async function loadDetail(db: DB, billId: string) {
     .where(eq(postings.journalEntryId, entry.id))
     .orderBy(postings.sortOrder);
   return { bill, journalEntry: entry, postings: entryPostings };
+}
+
+async function deleteDraftAndPdf(db: DB, draftId: string, storagePath: string) {
+  await db.delete(billDrafts).where(eq(billDrafts.id, draftId));
+  await unlink(resolveStoragePath(storagePath)).catch(() => {});
+}
+
+async function sweepExpiredDrafts(db: DB) {
+  const expired = await db
+    .select({ id: billDrafts.id, storagePath: billDrafts.storagePath })
+    .from(billDrafts)
+    .where(lt(billDrafts.expiresAt, new Date()));
+  for (const row of expired) {
+    await deleteDraftAndPdf(db, row.id, row.storagePath);
+  }
+}
+
+/**
+ * Resolve the user's supplier choice to a concrete supplier id.
+ * - `existing`: verify supplier exists, return id
+ * - `create`: insert (with org/VAT normalization). If the unique index fires
+ *   (another request just created the same identifier), re-query and use that.
+ */
+async function resolveSupplier(
+  db: DB,
+  choice: z.infer<typeof confirmBodySchema>['supplier'],
+): Promise<string> {
+  if (choice.kind === 'existing') {
+    const [row] = await db.select().from(suppliers).where(eq(suppliers.id, choice.id)).limit(1);
+    if (!row) throw new HTTPException(404, { message: 'Selected supplier not found.' });
+    return row.id;
+  }
+
+  const orgNumber = normalizeOrgNumber(choice.orgNumber);
+  const vatNumber = normalizeVatNumber(choice.vatNumber);
+  const name = normalizeName(choice.name);
+  if (!name) {
+    throw new HTTPException(400, { message: 'Supplier name is required.' });
+  }
+
+  try {
+    const [created] = await db.insert(suppliers).values({ name, orgNumber, vatNumber }).returning();
+    if (!created) throw new Error('Failed to insert supplier');
+    return created.id;
+  } catch (err) {
+    // Unique violation — race with another request. Look up by whichever
+    // identifier we have and use the existing row.
+    const match = await findSupplierMatch(db, { orgNumber, vatNumber, name });
+    if (match.kind === 'exact') return match.supplier.id;
+    throw err;
+  }
 }

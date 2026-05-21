@@ -50,10 +50,11 @@ export const bills = pgTable('bills', {
   mimeType: text('mime_type').notNull(),
   sizeBytes: integer('size_bytes').notNull(),
 
-  // Confirmed link to a supplier. Nullable in this commit so the existing
-  // POST /api/bills route keeps compiling; tightened to NOT NULL in the
-  // commit that introduces the prepare/confirm flow.
-  supplierId: uuid('supplier_id').references(() => suppliers.id),
+  // Confirmed link to a supplier, set at confirm time. Never null in practice
+  // — the prepare/confirm flow enforces it.
+  supplierId: uuid('supplier_id')
+    .notNull()
+    .references(() => suppliers.id),
 
   // Snapshots of what was on the invoice at upload time — preserved even if the
   // supplier record is later renamed/updated. The supplierId is the source of truth.

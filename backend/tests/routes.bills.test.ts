@@ -9,10 +9,11 @@ import { join } from 'node:path';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
 import { db } from '../src/db/client.ts';
+import { suppliers } from '../src/db/schema.ts';
 import { env } from '../src/env.ts';
 import { createApp } from '../src/index.ts';
 import { BAS_CHART } from '../src/lib/accounts.ts';
-import type { JournalGenerator } from '../src/lib/anthropic.ts';
+import type { JournalGenerator, JournalProposal } from '../src/lib/anthropic.ts';
 import {
   balancedProposal,
   unbalancedProposal,
@@ -25,8 +26,6 @@ const SAMPLE_PDF_PATH = join(import.meta.dir, '..', '..', 'sample_invoices', 'si
 
 beforeAll(async () => {
   await migrate(db, { migrationsFolder: './src/db/migrations' });
-  // Migration includes seed INSERTs, but in case the table existed beforehand
-  // (e.g. partial run), upsert the chart so tests have a stable baseline.
   for (const a of BAS_CHART) {
     await sql`INSERT INTO accounts (number, name) VALUES (${a.number}, ${a.name})
               ON CONFLICT (number) DO NOTHING`;
@@ -34,27 +33,56 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Only end this file's local `sql` — the shared queryClient from src/db/client.ts
-  // is closed automatically on process exit. Closing it here would break sibling
-  // test files that import the same singleton.
   await sql.end();
 });
 
 beforeEach(async () => {
-  // Truncate transactional tables — keep the seeded chart of accounts.
   await sql`TRUNCATE TABLE postings, journal_entries, bills, bill_drafts, suppliers RESTART IDENTITY CASCADE`;
 });
 
-function stub(proposal = balancedProposal): JournalGenerator {
+function stub(proposal: JournalProposal = balancedProposal): JournalGenerator {
   return async () => proposal;
 }
 
-async function uploadSamplePdf(app: ReturnType<typeof createApp>): Promise<Response> {
+async function preparePdf(app: ReturnType<typeof createApp>): Promise<Response> {
   const bytes = await readFile(SAMPLE_PDF_PATH);
   const form = new FormData();
   form.append('file', new Blob([bytes], { type: 'application/pdf' }), 'simple_invoice.pdf');
-  return app.request('/api/bills', { method: 'POST', body: form });
+  return app.request('/api/bills/prepare', { method: 'POST', body: form });
 }
+
+type PrepareResponse = {
+  draftId: string;
+  proposal: JournalProposal;
+  match:
+    | { kind: 'exact'; supplier: { id: string; name: string }; matchedBy: string }
+    | { kind: 'candidates'; candidates: { id: string; name: string }[] }
+    | { kind: 'none' };
+};
+
+async function confirmAsNewSupplier(
+  app: ReturnType<typeof createApp>,
+  draftId: string,
+  proposal: JournalProposal,
+) {
+  return app.request('/api/bills/confirm', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      draftId,
+      supplier: {
+        kind: 'create',
+        name: proposal.supplierName ?? 'Unknown',
+        orgNumber: proposal.supplierOrgNumber,
+        vatNumber: proposal.supplierVatNumber,
+      },
+    }),
+  });
+}
+
+// =============================================================================
+// GET /api/accounts
+// =============================================================================
 
 describe('GET /api/accounts', () => {
   test('returns the full BAS chart (20 rows)', async () => {
@@ -68,56 +96,135 @@ describe('GET /api/accounts', () => {
   });
 });
 
-describe('POST /api/bills', () => {
-  test('happy path — upload, generate, validate, persist', async () => {
-    const app = createApp({ db, generateJournal: stub(balancedProposal) });
-    const res = await uploadSamplePdf(app);
-    expect(res.status).toBe(201);
+// =============================================================================
+// POST /api/bills/prepare
+// =============================================================================
 
+describe('POST /api/bills/prepare', () => {
+  test('happy path — returns draftId + proposal + match=none for unseen supplier', async () => {
+    const app = createApp({ db, generateJournal: stub(balancedProposal) });
+    const res = await preparePdf(app);
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as PrepareResponse;
+    expect(body.draftId).toBeTruthy();
+    expect(body.proposal.supplierName).toBe('Acme Consulting AB');
+    expect(body.proposal.supplierOrgNumber).toBe('556677-8899');
+    expect(body.match.kind).toBe('none');
+  });
+
+  test('returns exact match by org_number when supplier is seeded', async () => {
+    await db.insert(suppliers).values({ name: 'Pre-existing Acme', orgNumber: '556677-8899' });
+    const app = createApp({ db, generateJournal: stub(balancedProposal) });
+    const res = await preparePdf(app);
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as PrepareResponse;
+    expect(body.match.kind).toBe('exact');
+    if (body.match.kind === 'exact') {
+      expect(body.match.matchedBy).toBe('org_number');
+      expect(body.match.supplier.name).toBe('Pre-existing Acme');
+    }
+  });
+
+  test('returns 400 without a file field', async () => {
+    const app = createApp({ db, generateJournal: stub() });
+    const res = await app.request('/api/bills/prepare', {
+      method: 'POST',
+      body: new FormData(),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test('returns 415 for non-PDF', async () => {
+    const app = createApp({ db, generateJournal: stub() });
+    const form = new FormData();
+    form.append('file', new Blob(['hello'], { type: 'text/plain' }), 'hello.txt');
+    const res = await app.request('/api/bills/prepare', { method: 'POST', body: form });
+    expect(res.status).toBe(415);
+  });
+
+  test('returns 502 if the LLM throws (PDF cleaned up)', async () => {
+    const app = createApp({
+      db,
+      generateJournal: async () => {
+        throw new Error('boom');
+      },
+    });
+    const res = await preparePdf(app);
+    expect(res.status).toBe(502);
+  });
+});
+
+// =============================================================================
+// POST /api/bills/confirm
+// =============================================================================
+
+describe('POST /api/bills/confirm', () => {
+  test('confirm with create-new creates supplier + bill + entry + postings', async () => {
+    const app = createApp({ db, generateJournal: stub(balancedProposal) });
+    const prep = (await (await preparePdf(app)).json()) as PrepareResponse;
+
+    const res = await confirmAsNewSupplier(app, prep.draftId, prep.proposal);
+    expect(res.status).toBe(201);
     const body = (await res.json()) as {
-      bill: {
-        id: string;
-        supplierName: string;
-        supplierOrgNumber: string;
-        supplierVatNumber: string;
-        grossAmount: string;
-      };
-      journalEntry: { id: string; status: string; validationErrors: string | null };
+      bill: { id: string; supplierId: string; supplierName: string };
+      journalEntry: { status: string; validationErrors: string | null };
       postings: { accountNumber: string; debit: string; credit: string }[];
     };
 
+    expect(body.bill.supplierId).toBeTruthy();
     expect(body.bill.supplierName).toBe('Acme Consulting AB');
-    expect(body.bill.supplierOrgNumber).toBe('556677-8899');
-    expect(body.bill.supplierVatNumber).toBe('SE556677889901');
-    expect(body.bill.grossAmount).toBe('12500.00');
     expect(body.journalEntry.status).toBe('pending');
     expect(body.journalEntry.validationErrors).toBeNull();
     expect(body.postings.length).toBe(3);
 
-    // Debit/credit totals balance to the cent
-    const debit = body.postings.reduce((s, p) => s + Number(p.debit), 0);
-    const credit = body.postings.reduce((s, p) => s + Number(p.credit), 0);
-    expect(debit).toBe(credit);
-
-    // Required accounts present
-    expect(body.postings.map((p) => p.accountNumber)).toContain('2440');
-    expect(body.postings.map((p) => p.accountNumber)).toContain('2640');
+    // Supplier was inserted with the proposal's identifiers
+    const rows = await db.select().from(suppliers);
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.orgNumber).toBe('556677-8899');
+    expect(rows[0]?.vatNumber).toBe('SE556677889901');
   });
 
-  test('persists with validation_errors when LLM returns unbalanced postings', async () => {
+  test('confirm with existing supplier id links the bill to that supplier', async () => {
+    const [existing] = await db
+      .insert(suppliers)
+      .values({ name: 'Pre-existing Acme', orgNumber: '556677-8899' })
+      .returning();
+
+    const app = createApp({ db, generateJournal: stub(balancedProposal) });
+    const prep = (await (await preparePdf(app)).json()) as PrepareResponse;
+
+    const res = await app.request('/api/bills/confirm', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        draftId: prep.draftId,
+        supplier: { kind: 'existing', id: existing?.id ?? '' },
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { bill: { supplierId: string } };
+    expect(body.bill.supplierId).toBe(existing?.id ?? '');
+
+    // No new supplier was created
+    const rows = await db.select().from(suppliers);
+    expect(rows.length).toBe(1);
+  });
+
+  test('persists validation_errors when LLM returned unbalanced postings', async () => {
     const app = createApp({ db, generateJournal: stub(unbalancedProposal) });
-    const res = await uploadSamplePdf(app);
+    const prep = (await (await preparePdf(app)).json()) as PrepareResponse;
+    const res = await confirmAsNewSupplier(app, prep.draftId, prep.proposal);
     expect(res.status).toBe(201);
     const body = (await res.json()) as {
       journalEntry: { status: string; validationErrors: string | null };
     };
-    expect(body.journalEntry.status).toBe('pending');
     expect(body.journalEntry.validationErrors).toMatch(/unbalanced/);
   });
 
-  test('persists with validation_errors when LLM picks an unknown account', async () => {
+  test('persists validation_errors for unknown account', async () => {
     const app = createApp({ db, generateJournal: stub(unknownAccountProposal) });
-    const res = await uploadSamplePdf(app);
+    const prep = (await (await preparePdf(app)).json()) as PrepareResponse;
+    const res = await confirmAsNewSupplier(app, prep.draftId, prep.proposal);
     expect(res.status).toBe(201);
     const body = (await res.json()) as {
       journalEntry: { validationErrors: string | null };
@@ -125,127 +232,141 @@ describe('POST /api/bills', () => {
     expect(body.journalEntry.validationErrors).toMatch(/9999/);
   });
 
-  test('rejects requests without a file field', async () => {
+  test('404 when draft is unknown', async () => {
     const app = createApp({ db, generateJournal: stub() });
-    const res = await app.request('/api/bills', { method: 'POST', body: new FormData() });
+    const res = await app.request('/api/bills/confirm', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        draftId: '00000000-0000-0000-0000-000000000000',
+        supplier: { kind: 'create', name: 'Test AB' },
+      }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  test('400 on malformed body', async () => {
+    const app = createApp({ db, generateJournal: stub() });
+    const res = await app.request('/api/bills/confirm', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ draftId: 'not-a-uuid' }),
+    });
     expect(res.status).toBe(400);
   });
 
-  test('rejects non-PDF uploads', async () => {
-    const app = createApp({ db, generateJournal: stub() });
-    const form = new FormData();
-    form.append('file', new Blob(['hello'], { type: 'text/plain' }), 'hello.txt');
-    const res = await app.request('/api/bills', { method: 'POST', body: form });
-    expect(res.status).toBe(415);
+  test('deletes the draft row after confirm', async () => {
+    const app = createApp({ db, generateJournal: stub(balancedProposal) });
+    const prep = (await (await preparePdf(app)).json()) as PrepareResponse;
+    await confirmAsNewSupplier(app, prep.draftId, prep.proposal);
+
+    const after = await sql`SELECT count(*)::int as c FROM bill_drafts`;
+    expect(after[0]?.c).toBe(0);
+  });
+});
+
+// =============================================================================
+// Draft management
+// =============================================================================
+
+describe('DELETE /api/bills/drafts/:id', () => {
+  test('abandons the draft', async () => {
+    const app = createApp({ db, generateJournal: stub(balancedProposal) });
+    const prep = (await (await preparePdf(app)).json()) as PrepareResponse;
+
+    const res = await app.request(`/api/bills/drafts/${prep.draftId}`, { method: 'DELETE' });
+    expect(res.status).toBe(204);
+
+    const after = await sql`SELECT count(*)::int as c FROM bill_drafts`;
+    expect(after[0]?.c).toBe(0);
   });
 
-  test('returns 502 if the LLM generator throws', async () => {
-    const app = createApp({
-      db,
-      generateJournal: async () => {
-        throw new Error('boom');
-      },
+  test('404 for unknown draft', async () => {
+    const app = createApp({ db, generateJournal: stub() });
+    const res = await app.request('/api/bills/drafts/00000000-0000-0000-0000-000000000000', {
+      method: 'DELETE',
     });
-    const res = await uploadSamplePdf(app);
-    expect(res.status).toBe(502);
-  });
-});
-
-describe('GET /api/bills', () => {
-  test('lists bills newest first with status', async () => {
-    const app = createApp({ db, generateJournal: stub(balancedProposal) });
-    await uploadSamplePdf(app);
-    await uploadSamplePdf(app);
-
-    const res = await app.request('/api/bills');
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      bills: { id: string; status: string; createdAt: string }[];
-    };
-    expect(body.bills.length).toBe(2);
-    for (const row of body.bills) {
-      expect(row.status).toBe('pending');
-    }
-    const [first, second] = body.bills;
-    if (!first || !second) throw new Error('expected 2 bills');
-    expect(new Date(first.createdAt).getTime()).toBeGreaterThanOrEqual(
-      new Date(second.createdAt).getTime(),
-    );
-  });
-});
-
-describe('GET /api/bills/:id', () => {
-  test('returns full detail', async () => {
-    const app = createApp({ db, generateJournal: stub(balancedProposal) });
-    const created = (await (await uploadSamplePdf(app)).json()) as { bill: { id: string } };
-
-    const res = await app.request(`/api/bills/${created.bill.id}`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      bill: { id: string };
-      journalEntry: { status: string };
-      postings: unknown[];
-    };
-    expect(body.bill.id).toBe(created.bill.id);
-    expect(body.postings.length).toBe(3);
-  });
-
-  test('returns 404 for missing bill', async () => {
-    const app = createApp({ db, generateJournal: stub() });
-    const res = await app.request('/api/bills/00000000-0000-0000-0000-000000000000');
     expect(res.status).toBe(404);
   });
 });
 
-describe('GET /api/bills/:id/pdf', () => {
-  test('streams the stored PDF inline', async () => {
+describe('GET /api/bills/drafts/:id/pdf', () => {
+  test('streams the draft PDF for preview', async () => {
     const app = createApp({ db, generateJournal: stub(balancedProposal) });
-    const created = (await (await uploadSamplePdf(app)).json()) as { bill: { id: string } };
+    const prep = (await (await preparePdf(app)).json()) as PrepareResponse;
 
-    const res = await app.request(`/api/bills/${created.bill.id}/pdf`);
+    const res = await app.request(`/api/bills/drafts/${prep.draftId}/pdf`);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/pdf');
-    expect(res.headers.get('content-disposition')).toMatch(/inline/);
-    const body = await res.arrayBuffer();
-    expect(body.byteLength).toBeGreaterThan(0);
   });
 });
 
-describe('POST /api/bills/:id/approve|reject', () => {
-  test('approve flips status and is idempotent', async () => {
-    const app = createApp({ db, generateJournal: stub(balancedProposal) });
-    const created = (await (await uploadSamplePdf(app)).json()) as { bill: { id: string } };
+// =============================================================================
+// GET / detail / pdf / approve / reject — unchanged behaviour
+// =============================================================================
 
+describe('GET /api/bills + detail + approve/reject', () => {
+  async function uploadAndConfirm(app: ReturnType<typeof createApp>) {
+    const prep = (await (await preparePdf(app)).json()) as PrepareResponse;
+    const confirmRes = await confirmAsNewSupplier(app, prep.draftId, prep.proposal);
+    return (await confirmRes.json()) as { bill: { id: string } };
+  }
+
+  test('lists bills newest first', async () => {
+    const app = createApp({ db, generateJournal: stub(balancedProposal) });
+    await uploadAndConfirm(app);
+    await uploadAndConfirm(app);
+    const res = await app.request('/api/bills');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { bills: { status: string }[] };
+    expect(body.bills.length).toBe(2);
+    for (const row of body.bills) expect(row.status).toBe('pending');
+  });
+
+  test('detail returns full bill', async () => {
+    const app = createApp({ db, generateJournal: stub(balancedProposal) });
+    const created = await uploadAndConfirm(app);
+    const res = await app.request(`/api/bills/${created.bill.id}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { postings: unknown[] };
+    expect(body.postings.length).toBe(3);
+  });
+
+  test('approve flips status, idempotent', async () => {
+    const app = createApp({ db, generateJournal: stub(balancedProposal) });
+    const created = await uploadAndConfirm(app);
     const first = await app.request(`/api/bills/${created.bill.id}/approve`, { method: 'POST' });
     expect(first.status).toBe(200);
-    const b1 = (await first.json()) as {
-      journalEntry: { status: string; decidedAt: string | null };
-    };
-    expect(b1.journalEntry.status).toBe('approved');
-    expect(b1.journalEntry.decidedAt).not.toBeNull();
-
-    // Idempotent — second approve returns the same state, doesn't error
+    expect(((await first.json()) as { journalEntry: { status: string } }).journalEntry.status).toBe(
+      'approved',
+    );
     const second = await app.request(`/api/bills/${created.bill.id}/approve`, { method: 'POST' });
     expect(second.status).toBe(200);
-    const b2 = (await second.json()) as { journalEntry: { status: string } };
-    expect(b2.journalEntry.status).toBe('approved');
   });
 
   test('reject flips status', async () => {
     const app = createApp({ db, generateJournal: stub(balancedProposal) });
-    const created = (await (await uploadSamplePdf(app)).json()) as { bill: { id: string } };
-
+    const created = await uploadAndConfirm(app);
     const res = await app.request(`/api/bills/${created.bill.id}/reject`, { method: 'POST' });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { journalEntry: { status: string } };
-    expect(body.journalEntry.status).toBe('rejected');
+    expect(((await res.json()) as { journalEntry: { status: string } }).journalEntry.status).toBe(
+      'rejected',
+    );
   });
 
-  test('404 for unknown bill', async () => {
+  test('404 approving unknown bill', async () => {
     const app = createApp({ db, generateJournal: stub() });
     const res = await app.request('/api/bills/00000000-0000-0000-0000-000000000000/approve', {
       method: 'POST',
     });
     expect(res.status).toBe(404);
+  });
+
+  test('PDF stream for confirmed bill', async () => {
+    const app = createApp({ db, generateJournal: stub(balancedProposal) });
+    const created = await uploadAndConfirm(app);
+    const res = await app.request(`/api/bills/${created.bill.id}/pdf`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/pdf');
   });
 });

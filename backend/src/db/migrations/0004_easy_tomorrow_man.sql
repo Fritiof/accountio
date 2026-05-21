@@ -1,0 +1,1 @@
+ALTER TABLE "bills" ALTER COLUMN "supplier_id" SET NOT NULL;
