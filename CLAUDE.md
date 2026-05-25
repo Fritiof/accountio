@@ -2,6 +2,8 @@
 
 Concise rules for any Claude session working in this repo. Read this first.
 
+For **how to add features** (new endpoints, DB columns, LLM proposal fields, frontend pages, tests), see [EXTENDING.md](EXTENDING.md) — recipes are kept there to keep this file scannable.
+
 ## What this is
 
 A take-home assignment: a web app where an accountant uploads a Swedish supplier invoice (PDF), an LLM generates a balanced double-entry journal entry against the BAS chart of accounts, both are persisted, and the accountant approves or rejects the proposal side-by-side with the PDF.

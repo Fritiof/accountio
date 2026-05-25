@@ -359,7 +359,10 @@ Tests are not in pre-commit (too slow); they run via CI or manually. Adding them
 
 ## Engineering guardrails
 
-See [CLAUDE.md](CLAUDE.md) — the rules for any human or AI agent contributing to this repo. Highlights:
+- [CLAUDE.md](CLAUDE.md) — the rules (no `any`, conventional commits, accounting invariants, run modes, etc.). Read first.
+- [EXTENDING.md](EXTENDING.md) — recipes for common feature work (new endpoint, DB column, LLM proposal field, frontend page, test). Read when adding something.
+
+Highlights from CLAUDE.md:
 
 - **No `any`**, explicit or implicit — both Biome and TypeScript strict block it.
 - **Conventional commits**, **merge commits** never rebase.
